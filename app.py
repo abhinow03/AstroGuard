@@ -915,6 +915,8 @@ if run_btn:
         "mc_sum":             mc_sum,
         "mission_day":        mission_day,
         "last_log_path":      str(log_path),
+        "patient_used":       patient,
+        "mg_used":            mg_run,
     })
     st.rerun()
 
@@ -1072,6 +1074,156 @@ st.markdown(f"""
     <div class="hud-label">P(Breach)</div>
     <div class="hud-value red">{p_breach:.1f}<span style="font-size:1rem">%</span></div>
     <div class="hud-sub">{n_sims} MC trajectories</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ── Fatigue Equation Breakdown ─────────────────────────────────────────────────
+# Shows every input → computed scalar → final fatigue rate so the user can see
+# exactly why the fatigue number came out as it did.
+with st.expander("// FATIGUE EQUATION BREAKDOWN  —  inputs & computed scalars", expanded=True):
+    _p   = ss.get("patient_used",  patient)   # patient used in last sim
+    _mg  = ss.get("mg_used",       mg_now)     # microgravity factors used
+    _cfg = {
+        "carb_g":    ss.get("cfg_carb_g",    130),
+        "prot_g":    ss.get("cfg_protein_g", 20),
+        "meals":     ss.get("cfg_meals",     3),
+        "water_L":   ss.get("cfg_water_L",   2.0),
+        "sodium_mg": ss.get("cfg_sodium_mg", 1500),
+        "sleep_h":   ss.get("cfg_sleep_h",   8.0),
+    }
+
+    # Re-compute the same scalars fatigue.py used
+    from simulation.fatigue import (
+        _hydration_state, _hydration_penalty,
+        _sleep_debt_penalty, _protein_recovery_factor,
+        _glycogen_init,
+        _RATE_EVA_ACCUMULATE, _RATE_SLEEP_RECOVER, _RATE_PASSIVE_RECOVER,
+    )
+    _hyd_state = _hydration_state(_cfg["water_L"], _cfg["sodium_mg"])
+    _hyd_pen   = _hydration_penalty(_hyd_state)
+    _slp_pen   = _sleep_debt_penalty(_cfg["sleep_h"], mission_day_used)
+    _prot_rec  = _protein_recovery_factor(_cfg["prot_g"], _cfg["meals"], _p.weight_kg)
+    _gly_max   = _glycogen_init(_p.lean_mass_kg, _mg.glycogen_factor)
+    _gly_start = _gly_max * 0.80   # same initial condition as compute_fatigue
+
+    # Effective EVA rate at peak (glycogen at start = 80%)
+    _gly_frac_start = 0.80
+    _gly_pen_start  = 1.0 + 0.60 * (1.0 - _gly_frac_start)
+    # Worst case: glycogen depleted (fraction = 0)
+    _gly_pen_worst  = 1.60
+
+    _eva_rate_start  = _RATE_EVA_ACCUMULATE * (1.0 / max(_mg.vo2max_factor, 0.01)) * _hyd_pen * _gly_pen_start * _slp_pen
+    _eva_rate_worst  = _RATE_EVA_ACCUMULATE * (1.0 / max(_mg.vo2max_factor, 0.01)) * _hyd_pen * _gly_pen_worst  * _slp_pen
+    _slp_rate        = _RATE_SLEEP_RECOVER  * _mg.vo2max_factor * _prot_rec * (_cfg["sleep_h"] / 8.0)
+    _rest_rate       = _RATE_PASSIVE_RECOVER * _prot_rec / max(_slp_pen, 0.01)
+
+    eq_c1, eq_c2, eq_c3 = st.columns(3)
+
+    with eq_c1:
+        st.markdown(f"""
+<div style="font-family:var(--mono);font-size:0.6rem;line-height:1.9">
+  <div style="color:var(--hud-cyan);text-transform:uppercase;letter-spacing:0.18em;
+              margin-bottom:0.5rem;border-bottom:1px solid var(--hud-border);padding-bottom:0.3rem">
+    Patient + Microgravity
+  </div>
+  <div style="color:var(--hud-muted)">Astronaut</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_p.display_name}</div>
+
+  <div style="color:var(--hud-muted)">Resting HR (ground)</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_p.hr_baseline:.0f} bpm</div>
+
+  <div style="color:var(--hud-muted)">HR offset (microgravity)</div>
+  <div style="color:var(--hud-amber);margin-bottom:0.4rem">+{_mg.hr_offset:.1f} bpm  (day {mission_day_used})</div>
+
+  <div style="color:var(--hud-muted)">VO2max factor</div>
+  <div style="color:{'var(--hud-amber)' if _mg.vo2max_factor < 0.90 else 'var(--hud-green)'};margin-bottom:0.4rem">
+    x{_mg.vo2max_factor:.3f}  ({_p.vo2max_ml_kg_min:.1f} -> {_p.vo2max_ml_kg_min*_mg.vo2max_factor:.1f} mL/kg/min)
+  </div>
+
+  <div style="color:var(--hud-muted)">Lean mass</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_p.lean_mass_kg:.1f} kg</div>
+
+  <div style="color:var(--hud-muted)">Glycogen capacity (adj)</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_gly_max:.0f} g  (x{_mg.muscle_factor:.3f} muscle factor)</div>
+
+  <div style="color:var(--hud-muted)">Glycogen at mission start</div>
+  <div style="color:var(--hud-text)">{_gly_start:.0f} g  (80% of capacity)</div>
+</div>
+""", unsafe_allow_html=True)
+
+    with eq_c2:
+        st.markdown(f"""
+<div style="font-family:var(--mono);font-size:0.6rem;line-height:1.9">
+  <div style="color:var(--hud-cyan);text-transform:uppercase;letter-spacing:0.18em;
+              margin-bottom:0.5rem;border-bottom:1px solid var(--hud-border);padding-bottom:0.3rem">
+    Nutrition + Recovery Scalars
+  </div>
+  <div style="color:var(--hud-muted)">Daily water</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_cfg["water_L"]:.1f} L  |  Na {_cfg["sodium_mg"]:.0f} mg/day</div>
+
+  <div style="color:var(--hud-muted)">Hydration state</div>
+  <div style="color:{'var(--hud-green)' if _hyd_state > 0.90 else 'var(--hud-amber)'};margin-bottom:0.4rem">
+    {_hyd_state:.3f}  (need = {2.0 + max(0,_cfg["sodium_mg"]-1500)*1.5e-4:.2f} L/day)
+  </div>
+
+  <div style="color:var(--hud-muted)">Hydration penalty (EVA)</div>
+  <div style="color:{'var(--hud-green)' if _hyd_pen < 1.05 else 'var(--hud-amber)'};margin-bottom:0.4rem">
+    x{_hyd_pen:.3f}  (+{(_hyd_pen-1)*100:.1f}% EVA fatigue rate)
+  </div>
+
+  <div style="color:var(--hud-muted)">Sleep {_cfg["sleep_h"]:.1f}h / night</div>
+  <div style="color:{'var(--hud-red)' if _slp_pen > 1.15 else 'var(--hud-amber)' if _slp_pen > 1.05 else 'var(--hud-green)'};margin-bottom:0.4rem">
+    debt penalty x{_slp_pen:.3f}  (+{(_slp_pen-1)*100:.1f}% EVA fatigue)
+  </div>
+
+  <div style="color:var(--hud-muted)">Protein {_cfg["prot_g"]*_cfg["meals"]:.0f}g/day vs {1.6*_p.weight_kg:.0f}g target</div>
+  <div style="color:{'var(--hud-green)' if _prot_rec > 0.90 else 'var(--hud-amber)'};margin-bottom:0.4rem">
+    recovery factor x{_prot_rec:.3f}
+  </div>
+
+  <div style="color:var(--hud-muted)">Glycogen penalty (80% full)</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">x{_gly_pen_start:.3f}</div>
+
+  <div style="color:var(--hud-muted)">Glycogen penalty (depleted)</div>
+  <div style="color:var(--hud-red)">x{_gly_pen_worst:.3f}  (worst case)</div>
+</div>
+""", unsafe_allow_html=True)
+
+    with eq_c3:
+        st.markdown(f"""
+<div style="font-family:var(--mono);font-size:0.6rem;line-height:1.9">
+  <div style="color:var(--hud-cyan);text-transform:uppercase;letter-spacing:0.18em;
+              margin-bottom:0.5rem;border-bottom:1px solid var(--hud-border);padding-bottom:0.3rem">
+    Per-Minute Fatigue Rates
+  </div>
+  <div style="color:var(--hud-muted)">EVA accumulation formula</div>
+  <div style="color:var(--hud-text);margin-bottom:0.2rem">
+    {_RATE_EVA_ACCUMULATE} x (hr_norm / {_mg.vo2max_factor:.3f})<br>
+    x {_hyd_pen:.3f} [hydration]<br>
+    x {_slp_pen:.3f} [sleep debt]<br>
+    x glycogen_penalty
+  </div>
+  <div style="color:var(--hud-muted);margin-top:0.4rem">EVA rate (glycogen 80%)</div>
+  <div style="color:var(--hud-orange);margin-bottom:0.4rem">+{_eva_rate_start:.5f} / min</div>
+
+  <div style="color:var(--hud-muted)">EVA rate (glycogen depleted)</div>
+  <div style="color:var(--hud-red);margin-bottom:0.4rem">+{_eva_rate_worst:.5f} / min</div>
+
+  <div style="color:var(--hud-muted)">Sleep recovery rate</div>
+  <div style="color:var(--hud-green);margin-bottom:0.4rem">-{_slp_rate:.5f} / min</div>
+
+  <div style="color:var(--hud-muted)">Passive rest rate</div>
+  <div style="color:var(--hud-green);margin-bottom:0.6rem">-{_rest_rate:.5f} / min</div>
+
+  <div style="border-top:1px solid var(--hud-border);padding-top:0.5rem">
+    <div style="color:var(--hud-muted)">Peak fatigue (this run)</div>
+    <div style="color:var(--hud-orange);font-size:0.8rem">{peak_f:.4f}  at H+{peak_h:02d}</div>
+    <div style="color:var(--hud-muted);margin-top:0.3rem">Trend</div>
+    <div style="color:var(--hud-text)">{analytics["trend_label"]}  (slope {analytics["trend_slope"]:.6f})</div>
+    <div style="color:var(--hud-muted);margin-top:0.3rem">Status</div>
+    <div style="color:{status_color};font-size:0.8rem">{status_label}</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
