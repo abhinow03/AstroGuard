@@ -17,6 +17,7 @@ from scipy import stats
 from simulation.events import sample_events
 from simulation.health_vars import build_mission_timeline, build_hydration_timeline, build_food_timeline
 from simulation.fatigue import compute_fatigue
+from simulation.patient import PatientProfile, MicrogravityFactors, microgravity_factors
 
 
 # ── Single-run analytics ───────────────────────────────────────────────────────
@@ -104,9 +105,16 @@ def run_monte_carlo(
     threshold: float = 0.80,
     n_evas: int = 1,
     mission_day: int = 0,
-    water_intake: float = 0.25,
+    water_intake: float = 0.25,       # legacy — kept for compat; daily_water_L preferred
     meals_per_day: float = 3.0,
     base_seed: int = 42,
+    # ── New patient-aware parameters ──────────────────────────────────────────
+    patient: "PatientProfile | None" = None,
+    carb_g_per_meal: float = 130.0,
+    protein_g_per_meal: float = 20.0,
+    daily_water_L: float = 2.0,
+    sodium_mg_per_day: float = 1000.0,
+    sleep_hours: float = 8.0,
 ) -> Dict:
     """
     Run `n_sims` independent simulations with stochastic event timing.
@@ -131,12 +139,21 @@ def run_monte_carlo(
     mission_min = mission_hours * 60
     fatigue_matrix = np.zeros((n_sims, mission_min))
 
+    # Resolve microgravity factors once (same for all MC iterations)
+    mg = microgravity_factors(mission_day)
+
     for i in range(n_sims):
         seed = base_seed + i * 7
         rng  = np.random.default_rng(seed)
 
-        # Randomise EVA intensity slightly
-        intensity_i = float(np.clip(eva_intensity + rng.normal(0, 0.05), 0.1, 0.95))
+        # Randomise EVA intensity; widen variance as deconditioning progresses
+        intensity_jitter = 0.05 * (1.0 + 0.01 * mission_day)
+        intensity_i = float(np.clip(eva_intensity + rng.normal(0, intensity_jitter), 0.1, 0.95))
+
+        # Randomise nutrition within plausible intake variation (±10g carbs, ±0.5h sleep)
+        carb_i    = float(np.clip(carb_g_per_meal    + rng.normal(0, 10.0),  20, 400))
+        protein_i = float(np.clip(protein_g_per_meal + rng.normal(0,  5.0),   5, 100))
+        sleep_i   = float(np.clip(sleep_hours        + rng.normal(0,  0.5),   4,  10))
 
         events_i = sample_events(
             mission_hours=mission_hours,
@@ -171,13 +188,19 @@ def run_monte_carlo(
             seed=seed + 3,
         )
 
-        fatigue_i, _ = compute_fatigue(
+        fatigue_i, _, _ = compute_fatigue(
             hr_arr=mission_df_i["HeartRate"].values,
             events=events_i,
             threshold=threshold,
+            patient=patient,
+            mg_factors=mg,
+            carb_g_per_meal=carb_i,
+            protein_g_per_meal=protein_i,
+            meals_per_day=meals_per_day,
+            daily_water_L=daily_water_L,
+            sodium_mg_per_day=sodium_mg_per_day,
+            sleep_hours=sleep_i,
             mission_day=mission_day,
-            hydration_arr=hydration_i,
-            food_arr=food_i,
         )
         fatigue_matrix[i] = fatigue_i
 
