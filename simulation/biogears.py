@@ -322,13 +322,83 @@ def _load_fallback(eva_intensity: float, eva_duration_min: float, recovery_min: 
     })
 
 
-# ── Precomputed CSV library ────────────────────────────────────────────────────
+# ── Precomputed XML library ────────────────────────────────────────────────────
+#
+# BioGears runs are expensive (~3-4 minutes each). After a live run succeeds,
+# we serialise the resulting DataFrame to an XML file in precomputed/ so the
+# next session can load it instantly in CSV-mode without re-running the engine.
+#
+# XML format follows the BioGears namespace convention used throughout the project
+# (uri:/mil/tatrc/physiology/datamodel) so the files are structurally consistent
+# with the scenario XML and mission log XML already produced by this codebase.
+#
+# File naming: intensity_050.xml  →  EVA intensity 0.50
+#              intensity_070.xml  →  EVA intensity 0.70
 
-def _save_precomputed(df: pd.DataFrame, eva_intensity: float) -> None:
-    """Save a successful live BioGears run to precomputed/ for future CSV-mode use."""
+import xml.etree.ElementTree as ET
+
+_PC_NS  = "uri:/mil/tatrc/physiology/datamodel"
+_PC_XSI = "http://www.w3.org/2001/XMLSchema-instance"
+ET.register_namespace("",    _PC_NS)
+ET.register_namespace("xsi", _PC_XSI)
+
+
+def _save_precomputed_xml(df: pd.DataFrame, eva_intensity: float) -> Path:
+    """
+    Serialise a BioGears output DataFrame to an XML file in precomputed/.
+
+    Each column becomes a <Signal> element with a name attribute; each row
+    becomes a <Sample> element whose value is the floating-point measurement
+    at that time step. The Time_s column is written as <Time> elements on
+    the parent <Sample> for easy human inspection.
+
+    Returns the path of the written file.
+    """
     PRECOMPUTED_DIR.mkdir(exist_ok=True)
-    name = f"intensity_{int(round(eva_intensity * 100)):03d}.csv"
-    df.to_csv(PRECOMPUTED_DIR / name, index=False)
+    fname = f"intensity_{int(round(eva_intensity * 100)):03d}.xml"
+    out   = PRECOMPUTED_DIR / fname
+
+    root = ET.Element(f"{{{_PC_NS}}}BiogearsCaptureData", {
+        f"{{{_PC_XSI}}}schemaLocation": "",
+        "contentVersion": "AstroGuard_1.0",
+        "evaIntensity":   f"{eva_intensity:.4f}",
+        "rows":           str(len(df)),
+        "columns":        str(len(df.columns)),
+    })
+
+    # Write column metadata
+    cols_el = ET.SubElement(root, f"{{{_PC_NS}}}Columns")
+    for col in df.columns:
+        ET.SubElement(cols_el, f"{{{_PC_NS}}}Column", {"name": col})
+
+    # Write row data
+    rows_el = ET.SubElement(root, f"{{{_PC_NS}}}Rows")
+    for _, row in df.iterrows():
+        r_el = ET.SubElement(rows_el, f"{{{_PC_NS}}}Row")
+        for col in df.columns:
+            ET.SubElement(r_el, f"{{{_PC_NS}}}V", {"c": col}).text = f"{row[col]:.6g}"
+
+    # Pretty-print
+    _pc_indent(root)
+    ET.ElementTree(root).write(str(out), xml_declaration=True, encoding="UTF-8")
+    return out
+
+
+def _pc_indent(elem: ET.Element, level: int = 0) -> None:
+    """Minimal in-place pretty-printer (Python 3.8 compatible)."""
+    pad = "\n" + "  " * level
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = pad + "  "
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = pad
+        for child in elem:
+            _pc_indent(child, level + 1)
+        if not child.tail or not child.tail.strip():
+            child.tail = pad
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = pad
 
 
 def _load_precomputed(eva_intensity: float) -> Tuple["pd.DataFrame | None", str]:
