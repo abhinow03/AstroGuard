@@ -17,6 +17,7 @@ from simulation.mission_log import save_mission_log
 from simulation.events import sample_events
 from simulation.fatigue import compute_fatigue, normalise_biogears_fatigue
 from simulation.health_vars import build_mission_timeline, build_hydration_timeline, build_food_timeline
+from simulation.patient import load_patients, microgravity_factors
 from visualization.charts import (
     make_risk_gauge,
     plot_biogears_raw,
@@ -509,13 +510,22 @@ caption, .stCaption { font-family: var(--mono) !important; font-size: 0.62rem !i
 """, unsafe_allow_html=True)
 
 
-# ── BioGears cached call ───────────────────────────────────────────────────────
+# ── Cached helpers ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def cached_biogears(eva_intensity: float, eva_duration_min: float, recovery_min: float, mode: str = "live"):
     return get_biogears_segment(eva_intensity, eva_duration_min, recovery_min, mode=mode)
 
+@st.cache_data(show_spinner=False)
+def _cached_patients():
+    return load_patients()
 
-# ── Sidebar — Mission Control Panel ───────────────────────────────────────────
+ALL_PATIENTS = _cached_patients()
+PATIENT_NAMES = list(ALL_PATIENTS.keys())
+
+_TIER_COLOR = {"Elite": "#00ff88", "Good": "#00d4ff", "Normal": "#ffaa00", "Deconditioned": "#ff1a3c"}
+
+
+# ── Sidebar — simplified to EVA + mission params only ─────────────────────────
 with st.sidebar:
     st.markdown("""
     <div style="padding:0.8rem 0 0.6rem">
@@ -525,11 +535,11 @@ with st.sidebar:
       </div>
       <div style="font-family:var(--mono);font-size:1.0rem;color:var(--hud-cyan);
                   text-shadow:0 0 8px rgba(0,212,255,0.6);letter-spacing:0.1em;text-transform:uppercase">
-        <span style="color:var(--hud-muted)">▸</span> ASTROGUARD
+        <span style="color:var(--hud-muted)">&#9658;</span> ASTROGUARD
       </div>
       <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-dim);
                   letter-spacing:0.12em;margin-top:0.1rem">
-        MISSION CONTROL · v1.0
+        MISSION CONTROL · v2.0
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -537,94 +547,267 @@ with st.sidebar:
 
     st.markdown('<div class="sb-group">BioGears Source</div>', unsafe_allow_html=True)
     bg_mode_label = st.radio(
-        "Mode",
-        options=["⚡ CSV  (instant)", "🔬 Live BioGears"],
-        index=0,
-        help=(
-            "CSV: loads a pre-computed run instantly — great for exploring parameters.\n"
-            "Live: actually runs bg-scenario.exe (~3-5 min) and saves result for future CSV use."
-        ),
-        horizontal=True,
+        "Mode", options=["CSV (instant)", "Live BioGears"],
+        index=0, horizontal=True,
+        help="CSV: pre-computed instant load. Live: runs bg-scenario.exe (~4 min).",
     )
     bg_mode = "csv" if "CSV" in bg_mode_label else "live"
     st.divider()
 
-    st.markdown('<div class="sb-group">EVA Scenario</div>', unsafe_allow_html=True)
-    eva_intensity = st.slider(
-        "Intensity", 0.10, 0.90, 0.50, 0.05,
-        help="Exercise intensity sent to BioGears (0=rest, 1=max exertion)",
-    )
-    eva_duration_min = st.slider(
-        "Duration (min)", 20, 240, 90, 10,
-        help="Duration of the EVA exercise phase",
-    )
-    recovery_min = st.slider(
-        "Recovery (min)", 10, 90, 30, 5,
-        help="Post-EVA recovery phase duration",
-    )
+    st.markdown('<div class="sb-group">EVA Parameters</div>', unsafe_allow_html=True)
+    eva_intensity = st.slider("EVA Intensity", 0.10, 0.90, 0.50, 0.05,
+        help="Workload fraction sent to BioGears (0 = rest, 1 = max exertion)")
+    eva_duration_min = st.slider("Mission Duration (min)", 20, 240, 90, 10,
+        help="Duration of the EVA exercise phase")
+    recovery_min = st.slider("Recovery Time (min)", 10, 90, 30, 5,
+        help="Post-EVA recovery phase duration")
     st.divider()
 
-    st.markdown('<div class="sb-group">Mission Parameters</div>', unsafe_allow_html=True)
-    mission_hours = st.select_slider(
-        "Duration", options=[24, 48, 72], value=48,
-        help="Total simulated mission length",
-    )
-    n_evas = st.slider("EVAs", 1, 3, 1, help="Number of EVA events in the mission")
-    threshold = st.slider(
-        "Risk Threshold", 0.50, 0.95, 0.80, 0.05,
-        help="Fatigue level above which the astronaut is at risk",
-    )
+    st.markdown('<div class="sb-group">Mission Settings</div>', unsafe_allow_html=True)
+    mission_hours = st.select_slider("Mission Length", options=[24, 48, 72], value=48)
+    mission_day   = st.slider("Days in Space", 0, 180, 0, 1,
+        help="Days in microgravity before this EVA — drives cardiovascular deconditioning")
     st.divider()
 
-    st.markdown('<div class="sb-group">Microgravity &amp; Physiology</div>', unsafe_allow_html=True)
-    mission_day = st.slider(
-        "Days in microgravity", 0, 180, 0, 1,
-        help=(
-            "Days the astronaut has been in space before this EVA.\n"
-            "Drives cardiovascular deconditioning (D = 1 + 0.008×day):\n"
-            "  • Resting HR rises +1.5 bpm/day (cap +18 bpm)\n"
-            "  • Fatigue accumulates faster, recovers slower"
-        ),
-    )
-    water_intake = st.slider(
-        "Water intake (L/rest-hour)", 0.0, 0.5, 0.25, 0.05,
-        help="Drinking rate during non-EVA time. Higher = better hydration = less fatigue penalty.",
-    )
-    meals_per_day = st.select_slider(
-        "Meals per day", options=[1, 2, 3, 4], value=3,
-        help="More meals = faster fatigue recovery. Meals are skipped during EVA.",
-    )
-    st.divider()
-
-    st.markdown('<div class="sb-group">Monte Carlo Engine</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sb-group">Monte Carlo</div>', unsafe_allow_html=True)
     n_sims = st.select_slider("Simulations", options=[10, 50, 100, 200, 500], value=100)
     st.divider()
 
-    run_btn = st.button("▶  EXECUTE SIMULATION", type="primary", use_container_width=True)
+    run_btn = st.button("EXECUTE SIMULATION", type="primary", use_container_width=True)
 
-    # Deconditioning factor info box
-    D_val        = 1.0 + 0.008 * mission_day
-    last_log     = st.session_state.get("last_log_path", "—")
-    last_log_name = last_log.split("\\")[-1] if last_log != "—" else "—"
+    # Fixed internals shown in info box
+    n_evas    = 1
+    threshold = 0.80
+    mg        = microgravity_factors(mission_day)
+    last_log  = st.session_state.get("last_log_path", "")
+    last_log_name = last_log.split("\\")[-1] if last_log else "—"
+
     st.markdown(f"""
     <div style="margin-top:1rem;padding:0.7rem;background:var(--hud-surface);
                 border:1px solid var(--hud-dim);font-family:var(--mono);
                 font-size:0.55rem;color:var(--hud-muted);letter-spacing:0.1em;
                 text-transform:uppercase;line-height:2">
-      BioGears · 8.2.0<br>
-      MODE · {"PRECOMPUTED CSV" if bg_mode == "csv" else "LIVE ENGINE"}<br>
-      DECON FACTOR D · {D_val:.3f}<br>
-      HR OFFSET · +{min(1.5 * mission_day, 18):.1f} BPM<br>
-      MC_SEED · 42<br>
-      <span style="color:var(--hud-green)">LOG · {last_log_name}</span>
+      BioGears 8.2.0 &nbsp;|&nbsp; {"CSV" if bg_mode=="csv" else "LIVE"}<br>
+      VO2max factor &nbsp;{mg.vo2max_factor:.3f}<br>
+      HR offset &nbsp;+{mg.hr_offset:.1f} bpm<br>
+      Muscle factor &nbsp;{mg.muscle_factor:.3f}<br>
+      <span style="color:var(--hud-green)">LOG {last_log_name}</span>
     </div>
     """, unsafe_allow_html=True)
 
 
-# ── Run simulation ─────────────────────────────────────────────────────────────
-if run_btn or "simulation_done" not in st.session_state:
+# ── Hero title ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<div style="
+  text-align:center;padding:2.2rem 0 1.4rem 0;letter-spacing:0.18em;
+  font-family:'Orbitron',sans-serif;font-weight:900;
+  font-size:clamp(2rem,5vw,3.6rem);color:#00d4ff;
+  text-shadow:0 0 10px rgba(0,212,255,1),0 0 30px rgba(0,212,255,0.7),
+              0 0 60px rgba(0,212,255,0.35),0 0 100px rgba(0,212,255,0.15);
+  text-transform:uppercase;user-select:none;">
+  ASTROGUARD
+  <span style="display:block;font-size:clamp(0.65rem,1.6vw,1.0rem);font-weight:700;
+               color:rgba(0,212,255,0.55);letter-spacing:0.55em;margin-top:0.35rem;
+               text-shadow:0 0 8px rgba(0,212,255,0.4);">
+    ASTRONAUT HEALTH DIGITAL TWIN
+  </span>
+</div>
+""", unsafe_allow_html=True)
 
-    with st.spinner("Initialising BioGears EVA scenario…"):
+
+# ── Astronaut selection ────────────────────────────────────────────────────────
+st.markdown('<div class="hud-section">Select Astronaut</div>', unsafe_allow_html=True)
+
+if "selected_patient_name" not in st.session_state:
+    st.session_state["selected_patient_name"] = "StandardMale"
+
+# Patient grid — 4 per row
+cols_per_row = 4
+patient_name_list = PATIENT_NAMES
+rows = [patient_name_list[i:i+cols_per_row] for i in range(0, len(patient_name_list), cols_per_row)]
+
+for row in rows:
+    grid_cols = st.columns(cols_per_row)
+    for col, pname in zip(grid_cols, row):
+        p = ALL_PATIENTS[pname]
+        tier_color = _TIER_COLOR.get(p.fitness_tier, "#00d4ff")
+        is_selected = (pname == st.session_state["selected_patient_name"])
+        border_color = tier_color if is_selected else "#0c2040"
+        bg_color     = "rgba(0,212,255,0.06)" if is_selected else "var(--hud-card)"
+        with col:
+            st.markdown(f"""
+            <div style="background:{bg_color};border:1px solid {border_color};
+                        padding:0.65rem 0.75rem;cursor:pointer;margin-bottom:0.3rem;
+                        clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,0 100%)">
+              <div style="font-family:var(--mono);font-size:0.58rem;color:{tier_color};
+                          text-transform:uppercase;letter-spacing:0.12em">
+                {p.fitness_tier} {'&#9679;' if is_selected else '&#9675;'}
+              </div>
+              <div style="font-family:var(--mono);font-size:0.72rem;color:var(--hud-text);
+                          margin:0.2rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                {p.display_name}
+              </div>
+              <div style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-muted)">
+                {p.sex[0]} · {p.age_yr:.0f}yr · {p.bmi:.1f} BMI
+              </div>
+              <div style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-muted)">
+                HR {p.hr_baseline:.0f} · VO2 {p.vo2max_ml_kg_min:.0f}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button(f"SELECT", key=f"sel_{pname}", use_container_width=True):
+                st.session_state["selected_patient_name"] = pname
+                st.rerun()
+
+# ── Selected astronaut profile card + nutrition editors ───────────────────────
+sel_name = st.session_state["selected_patient_name"]
+patient  = ALL_PATIENTS[sel_name]
+mg_now   = microgravity_factors(mission_day)
+adj      = mg_now.adjust_patient(patient)
+
+tier_color = _TIER_COLOR.get(patient.fitness_tier, "#00d4ff")
+
+st.markdown('<div class="hud-section">Astronaut Profile &amp; Mission Nutrition</div>',
+            unsafe_allow_html=True)
+
+card_col, config_col = st.columns([1, 1.6])
+
+with card_col:
+    st.markdown(f"""
+    <div class="hud-panel" style="border-color:{tier_color}40">
+      <span class="c tl" style="border-color:{tier_color}"></span>
+      <span class="c tr" style="border-color:{tier_color}"></span>
+      <span class="c bl" style="border-color:{tier_color}"></span>
+      <span class="c br" style="border-color:{tier_color}"></span>
+
+      <div style="font-family:var(--mono);font-size:0.58rem;color:{tier_color};
+                  text-transform:uppercase;letter-spacing:0.18em;margin-bottom:0.5rem">
+        {patient.fitness_tier} ASTRONAUT
+      </div>
+      <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-text);
+                  letter-spacing:0.06em;margin-bottom:0.8rem">
+        {patient.display_name}
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;
+                  font-family:var(--mono);font-size:0.6rem">
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Sex / Age</div>
+          <div style="color:var(--hud-text)">{patient.sex} / {patient.age_yr:.0f} yr</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Weight / Height</div>
+          <div style="color:var(--hud-text)">{patient.weight_kg:.1f} kg / {patient.height_cm:.0f} cm</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">BMI</div>
+          <div style="color:var(--hud-text)">{patient.bmi:.1f}</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Body Fat</div>
+          <div style="color:var(--hud-text)">{patient.body_fat_fraction*100:.0f}%</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Lean Mass</div>
+          <div style="color:var(--hud-text)">{patient.lean_mass_kg:.1f} kg</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Glycogen Cap</div>
+          <div style="color:var(--hud-text)">{patient.glycogen_capacity_g:.0f} g</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Resting HR</div>
+          <div style="color:var(--hud-cyan)">{patient.hr_baseline:.0f} bpm
+            <span style="color:var(--hud-muted)">+{mg_now.hr_offset:.1f} in space</span>
+          </div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">BP Baseline</div>
+          <div style="color:var(--hud-text)">{patient.systolic_bp:.0f}/{patient.diastolic_bp:.0f} mmHg</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">VO2max (ground)</div>
+          <div style="color:var(--hud-text)">{patient.vo2max_ml_kg_min:.1f} mL/kg/min</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">VO2max (day {mission_day})</div>
+          <div style="color:{'var(--hud-amber)' if mg_now.vo2max_factor < 0.90 else 'var(--hud-green)'}">{adj['vo2max_ml_kg_min']:.1f} mL/kg/min</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Glycogen (adj)</div>
+          <div style="color:var(--hud-text)">{adj['glycogen_capacity_g']:.0f} g</div>
+        </div>
+        <div>
+          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Est. daily kcal</div>
+          <div style="color:var(--hud-text)">{patient.daily_kcal_estimate:.0f} kcal</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with config_col:
+    st.markdown('<div style="font-family:var(--mono);font-size:0.6rem;color:var(--hud-cyan);'
+                'text-transform:uppercase;letter-spacing:0.18em;margin-bottom:0.6rem">'
+                '// Nutrition &amp; Recovery Configuration</div>', unsafe_allow_html=True)
+
+    nc1, nc2 = st.columns(2)
+    with nc1:
+        carb_g_per_meal = st.slider(
+            "Carbohydrates / meal (g)", 30, 300, 130, 5,
+            help="BioGears Carbohydrate field. NASA ISS target: ~370g/day total.")
+        protein_g_per_meal = st.slider(
+            "Protein / meal (g)", 5, 80, 20, 5,
+            help="BioGears Protein field. NASA EVA target: 1.6g/kg/day.")
+        meals_per_day = st.select_slider(
+            "Meals per day", options=[1, 2, 3, 4], value=3)
+    with nc2:
+        daily_water_L = st.slider(
+            "Daily water (L)", 1.0, 4.0, 2.0, 0.1,
+            help="BioGears Water field. NASA minimum: 2.0 L/day in space.")
+        sodium_mg_per_day = st.slider(
+            "Sodium / day (mg)", 500, 3000, 1500, 100,
+            help="BioGears Sodium field. NASA limit: 2300 mg/day. "
+                 "High sodium raises effective water need in microgravity.")
+        sleep_hours = st.slider(
+            "Sleep (hrs/night)", 4.0, 9.0, 8.0, 0.5,
+            help="BioGears SleepAmount. ISS astronauts avg 6.5h; NASA target 8h.")
+
+    # Live nutrition summary
+    daily_carb   = carb_g_per_meal * meals_per_day
+    daily_prot   = protein_g_per_meal * meals_per_day
+    daily_kcal   = daily_carb * 4 + daily_prot * 4
+    prot_target  = 1.6 * patient.weight_kg
+    prot_pct     = min(100, daily_prot / prot_target * 100)
+    prot_color   = "#00ff88" if prot_pct >= 90 else "#ffaa00" if prot_pct >= 60 else "#ff1a3c"
+
+    st.markdown(f"""
+    <div style="margin-top:0.8rem;padding:0.65rem 0.8rem;background:var(--hud-surface);
+                border:1px solid var(--hud-dim);font-family:var(--mono);font-size:0.58rem;
+                color:var(--hud-muted);letter-spacing:0.1em;text-transform:uppercase;
+                display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem">
+      <div>
+        <div>Daily carbs</div>
+        <div style="color:var(--hud-cyan)">{daily_carb:.0f} g</div>
+      </div>
+      <div>
+        <div>Protein vs target</div>
+        <div style="color:{prot_color}">{daily_prot:.0f} / {prot_target:.0f} g ({prot_pct:.0f}%)</div>
+      </div>
+      <div>
+        <div>Est. intake</div>
+        <div style="color:var(--hud-text)">{daily_kcal:.0f} kcal/day</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.divider()
+
+
+# ── Run simulation (only on button click — no auto-run) ───────────────────────
+if run_btn:
+
+    with st.spinner("Loading BioGears EVA segment…"):
         t0 = time.time()
         biogears_df, used_real, bg_msg = cached_biogears(
             eva_intensity, eva_duration_min, recovery_min, bg_mode
@@ -632,129 +815,132 @@ if run_btn or "simulation_done" not in st.session_state:
         bg_elapsed = time.time() - t0
 
     with st.spinner("Building mission timeline…"):
-        events = sample_events(
-            mission_hours=mission_hours,
-            eva_intensity=eva_intensity,
-            n_evas=n_evas,
-            seed=42,
-        )
+        events = sample_events(mission_hours=mission_hours, eva_intensity=eva_intensity,
+                               n_evas=n_evas, seed=42)
         mission_df = build_mission_timeline(
-            biogears_df=biogears_df,
-            events=events,
-            mission_hours=mission_hours,
-            eva_duration_min=eva_duration_min,
-            recovery_min=recovery_min,
-            mission_day=mission_day,
-            seed=0,
-        )
+            biogears_df=biogears_df, events=events, mission_hours=mission_hours,
+            eva_duration_min=eva_duration_min, recovery_min=recovery_min,
+            mission_day=mission_day, seed=0)
+        # Legacy hydration/food arrays still passed to build_mission_timeline internals
         hydration_arr = build_hydration_timeline(
-            events=events,
-            mission_hours=mission_hours,
-            eva_intensity=eva_intensity,
-            water_intake_L_per_rest_hour=water_intake,
-            seed=0,
-        )
+            events=events, mission_hours=mission_hours, eva_intensity=eva_intensity,
+            water_intake_L_per_rest_hour=daily_water_L / 16.0, seed=0)
         food_arr = build_food_timeline(
+            events=events, mission_hours=mission_hours, eva_intensity=eva_intensity,
+            meals_per_day=meals_per_day, seed=0)
+
+    with st.spinner("Computing fatigue model…"):
+        mg_run = microgravity_factors(mission_day)
+        fatigue, glycogen_fraction, risk_periods = compute_fatigue(
+            hr_arr=mission_df["HeartRate"].values,
             events=events,
-            mission_hours=mission_hours,
-            eva_intensity=eva_intensity,
+            threshold=threshold,
+            patient=patient,
+            mg_factors=mg_run,
+            carb_g_per_meal=carb_g_per_meal,
+            protein_g_per_meal=protein_g_per_meal,
             meals_per_day=meals_per_day,
-            seed=0,
+            daily_water_L=daily_water_L,
+            sodium_mg_per_day=sodium_mg_per_day,
+            sleep_hours=sleep_hours,
+            mission_day=mission_day,
         )
-
-    fatigue, risk_periods = compute_fatigue(
-        hr_arr=mission_df["HeartRate"].values,
-        events=events,
-        threshold=threshold,
-        mission_day=mission_day,
-        hydration_arr=hydration_arr,
-        food_arr=food_arr,
-    )
     bg_fatigue = normalise_biogears_fatigue(biogears_df, len(fatigue))
-
-    analytics = single_run_analytics(fatigue, threshold=threshold, mission_hours=mission_hours)
+    analytics  = single_run_analytics(fatigue, threshold=threshold, mission_hours=mission_hours)
     status_label, status_color = mission_status(analytics, threshold)
 
     with st.spinner(f"Running {n_sims} Monte Carlo trajectories…"):
         mc = run_monte_carlo(
-            biogears_df=biogears_df,
-            mission_hours=mission_hours,
-            eva_intensity=eva_intensity,
-            eva_duration_min=eva_duration_min,
-            recovery_min=recovery_min,
-            n_sims=n_sims,
-            threshold=threshold,
-            n_evas=n_evas,
-            mission_day=mission_day,
-            water_intake=water_intake,
-            meals_per_day=meals_per_day,
+            biogears_df=biogears_df, mission_hours=mission_hours,
+            eva_intensity=eva_intensity, eva_duration_min=eva_duration_min,
+            recovery_min=recovery_min, n_sims=n_sims, threshold=threshold,
+            n_evas=n_evas, mission_day=mission_day,
+            water_intake=daily_water_L / 16.0, meals_per_day=meals_per_day,
+            patient=patient,
+            carb_g_per_meal=carb_g_per_meal, protein_g_per_meal=protein_g_per_meal,
+            daily_water_L=daily_water_L, sodium_mg_per_day=sodium_mg_per_day,
+            sleep_hours=sleep_hours,
         )
     mc_sum = mc_summary(mc)
 
-    st.session_state.update({
-        "simulation_done": True,
-        "biogears_df":     biogears_df,
-        "used_real":       used_real,
-        "bg_msg":          bg_msg,
-        "bg_elapsed":      bg_elapsed,
-        "bg_mode":         bg_mode,
-        "events":          events,
-        "mission_df":      mission_df,
-        "hydration_arr":   hydration_arr,
-        "food_arr":        food_arr,
-        "fatigue":         fatigue,
-        "bg_fatigue":      bg_fatigue,
-        "risk_periods":    risk_periods,
-        "analytics":       analytics,
-        "status_label":    status_label,
-        "status_color":    status_color,
-        "mc":              mc,
-        "mc_sum":          mc_sum,
-        "mission_day":     mission_day,
-    })
-
     log_path = save_mission_log(
-        eva_intensity=eva_intensity,
-        eva_duration_min=eva_duration_min,
-        recovery_min=recovery_min,
-        mission_hours=mission_hours,
-        n_evas=n_evas,
-        threshold=threshold,
-        bg_mode=bg_mode,
-        n_sims=n_sims,
-        mission_day=mission_day,
-        water_intake=water_intake,
-        meals_per_day=meals_per_day,
-        events=events,
-        mission_df=mission_df,
-        fatigue=fatigue,
-        hydration_arr=hydration_arr,
-        food_arr=food_arr,
-        analytics=analytics,
-        mc_sum=mc_sum,
-        status_label=status_label,
-        status_color=status_color,
-        bg_msg=bg_msg,
+        eva_intensity=eva_intensity, eva_duration_min=eva_duration_min,
+        recovery_min=recovery_min, mission_hours=mission_hours, n_evas=n_evas,
+        threshold=threshold, bg_mode=bg_mode, n_sims=n_sims, mission_day=mission_day,
+        water_intake=daily_water_L / 16.0, meals_per_day=meals_per_day,
+        events=events, mission_df=mission_df, fatigue=fatigue,
+        hydration_arr=hydration_arr, food_arr=food_arr,
+        analytics=analytics, mc_sum=mc_sum,
+        status_label=status_label, status_color=status_color, bg_msg=bg_msg,
     )
-    st.session_state["last_log_path"] = str(log_path)
+
+    st.session_state.update({
+        "simulation_done":    True,
+        "biogears_df":        biogears_df,
+        "used_real":          used_real,
+        "bg_msg":             bg_msg,
+        "bg_elapsed":         bg_elapsed,
+        "bg_mode":            bg_mode,
+        "events":             events,
+        "mission_df":         mission_df,
+        "hydration_arr":      hydration_arr,
+        "food_arr":           food_arr,
+        "fatigue":            fatigue,
+        "glycogen_fraction":  glycogen_fraction,
+        "bg_fatigue":         bg_fatigue,
+        "risk_periods":       risk_periods,
+        "analytics":          analytics,
+        "status_label":       status_label,
+        "status_color":       status_color,
+        "mc":                 mc,
+        "mc_sum":             mc_sum,
+        "mission_day":        mission_day,
+        "last_log_path":      str(log_path),
+    })
+    st.rerun()
 
 
-# ── Load from session state ────────────────────────────────────────────────────
-ss            = st.session_state
-biogears_df   = ss["biogears_df"]
-used_real     = ss["used_real"]
-bg_msg        = ss["bg_msg"]
-bg_mode_used  = ss.get("bg_mode", "live")
-events        = ss["events"]
-mission_df    = ss["mission_df"]
-fatigue       = ss["fatigue"]
-bg_fatigue    = ss["bg_fatigue"]
-risk_periods  = ss["risk_periods"]
-analytics     = ss["analytics"]
-status_label  = ss["status_label"]
-status_color  = ss["status_color"]
-mc            = ss["mc"]
-mc_sum        = ss["mc_sum"]
+# ── Results — shown only after a simulation has run ───────────────────────────
+if "simulation_done" not in st.session_state:
+    st.markdown("""
+    <div style="margin:3rem auto;max-width:480px;padding:2rem;text-align:center;
+                background:var(--hud-card);border:1px solid var(--hud-border);
+                font-family:var(--mono);
+                clip-path:polygon(0 0,calc(100% - 16px) 0,100% 16px,100% 100%,16px 100%,0 calc(100% - 16px))">
+      <div style="font-size:0.6rem;color:var(--hud-muted);letter-spacing:0.2em;
+                  text-transform:uppercase;margin-bottom:1rem">
+        Awaiting Mission Input
+      </div>
+      <div style="font-size:1rem;color:var(--hud-cyan);text-shadow:0 0 8px rgba(0,212,255,0.5);
+                  letter-spacing:0.08em;margin-bottom:0.8rem">
+        SELECT ASTRONAUT + CONFIGURE<br>THEN CLICK EXECUTE
+      </div>
+      <div style="font-size:0.58rem;color:var(--hud-dim);line-height:1.8">
+        Pick a crew member above &nbsp;&bull;&nbsp;
+        Set nutrition &amp; recovery &nbsp;&bull;&nbsp;
+        Set EVA parameters in the sidebar
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
+
+
+# ── Load results from session state ───────────────────────────────────────────
+ss               = st.session_state
+biogears_df      = ss["biogears_df"]
+used_real        = ss["used_real"]
+bg_msg           = ss["bg_msg"]
+bg_mode_used     = ss.get("bg_mode", "csv")
+events           = ss["events"]
+mission_df       = ss["mission_df"]
+fatigue          = ss["fatigue"]
+bg_fatigue       = ss["bg_fatigue"]
+risk_periods     = ss["risk_periods"]
+analytics        = ss["analytics"]
+status_label     = ss["status_label"]
+status_color     = ss["status_color"]
+mc               = ss["mc"]
+mc_sum           = ss["mc_sum"]
 mission_day_used = ss.get("mission_day", 0)
 
 mission_min          = len(fatigue)
@@ -765,80 +951,41 @@ at_risk              = analytics["time_at_risk_pct"]
 p_breach             = mc_sum["p_any_breach"] * 100
 
 
-# ── G: Alert banner ─────────────────────────────────────────────────────────────
+# ── Alert banner ───────────────────────────────────────────────────────────────
 if status_label == "ABORT":
     st.markdown(
         '<div class="alert-banner alert-abort">'
-        '⚠ MASTER CAUTION &nbsp;·&nbsp; FATIGUE THRESHOLD BREACHED '
-        '&nbsp;·&nbsp; MISSION ABORT RECOMMENDED &nbsp;·&nbsp; ⚠'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+        '&#9888; MASTER CAUTION &nbsp;&middot;&nbsp; FATIGUE THRESHOLD BREACHED '
+        '&nbsp;&middot;&nbsp; MISSION ABORT RECOMMENDED &nbsp;&middot;&nbsp; &#9888;'
+        '</div>', unsafe_allow_html=True)
 elif status_label == "MONITOR":
     st.markdown(
         '<div class="alert-banner alert-monitor">'
-        '⚡ CAUTION &nbsp;·&nbsp; ELEVATED FATIGUE DETECTED '
-        '&nbsp;·&nbsp; MONITOR ASTRONAUT STATUS &nbsp;·&nbsp; ⚡'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+        '&#9889; CAUTION &nbsp;&middot;&nbsp; ELEVATED FATIGUE DETECTED '
+        '&nbsp;&middot;&nbsp; MONITOR ASTRONAUT STATUS &nbsp;&middot;&nbsp; &#9889;'
+        '</div>', unsafe_allow_html=True)
 
-
-# ── Hero title ─────────────────────────────────────────────────────────────────
-st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
-<div style="
-  text-align:center;
-  padding: 2.2rem 0 1.4rem 0;
-  letter-spacing: 0.18em;
-  font-family: 'Orbitron', sans-serif;
-  font-weight: 900;
-  font-size: clamp(2rem, 5vw, 3.6rem);
-  color: #00d4ff;
-  text-shadow:
-    0 0 10px rgba(0,212,255,1),
-    0 0 30px rgba(0,212,255,0.7),
-    0 0 60px rgba(0,212,255,0.35),
-    0 0 100px rgba(0,212,255,0.15);
-  text-transform: uppercase;
-  user-select: none;
-">
-  ASTROGUARD
-  <span style="
-    display:block;
-    font-size: clamp(0.65rem, 1.6vw, 1.0rem);
-    font-weight: 700;
-    color: rgba(0,212,255,0.55);
-    letter-spacing: 0.55em;
-    margin-top: 0.35rem;
-    text-shadow: 0 0 8px rgba(0,212,255,0.4);
-  ">ASTRONAUT HEALTH DIGITAL TWIN</span>
-</div>
-""", unsafe_allow_html=True)
 
 # ── Mission banner ─────────────────────────────────────────────────────────────
 if used_real and bg_mode_used == "live":
     ping_class, badge_class, bg_src_text = "green", "nominal",  "BIOGEARS LIVE"
 elif used_real and bg_mode_used == "csv":
-    ping_class, badge_class, bg_src_text = "green", "nominal",  "PRE-COMPUTED CSV"
+    ping_class, badge_class, bg_src_text = "green", "nominal",  "PRE-COMPUTED XML"
 else:
     ping_class, badge_class, bg_src_text = "amber", "fallback", "SYNTH FALLBACK"
 
 st.markdown(f"""
 <div class="mission-banner">
   <div>
-    <p class="mission-title hud-title-glow">▸ ASTROGUARD · HEALTH DIGITAL TWIN</p>
+    <p class="mission-title hud-title-glow">&#9658; ASTROGUARD &middot; HEALTH DIGITAL TWIN</p>
     <p class="mission-subtitle">
-      Musculoskeletal Fatigue Monitor &nbsp;·&nbsp;
-      BioGears Cardiovascular Engine &nbsp;·&nbsp;
-      Monte Carlo Risk Analysis
+      {patient.display_name} &nbsp;&middot;&nbsp;
+      {mission_hours_actual}h Mission &nbsp;&middot;&nbsp; EVA {eva_intensity:.0%}
+      &nbsp;&middot;&nbsp; Day {mission_day_used} in Space
     </p>
     <p class="mission-ref">
-      RES-HSFC-2025-001 &nbsp;|&nbsp;
-      MISSION-T+{mission_hours_actual}H &nbsp;|&nbsp;
-      EVA-INT {eva_intensity:.0%} &nbsp;|&nbsp;
-      THRESHOLD {threshold:.0%} &nbsp;|&nbsp;
-      MC-N {n_sims}
+      RES-HSFC-2025-001 &nbsp;|&nbsp; MC-N {n_sims}
+      &nbsp;|&nbsp; THRESHOLD {threshold:.0%}
     </p>
   </div>
   <div style="text-align:right">
@@ -848,31 +995,28 @@ st.markdown(f"""
     </div>
     <div style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-dim);
                 margin-top:0.5rem;letter-spacing:0.1em;text-transform:uppercase">
-      {bg_msg[:55]}
+      {bg_msg[:60]}
     </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-
-# ── BioGears status ────────────────────────────────────────────────────────────
 if used_real:
-    st.success(f"BioGears live run complete — {bg_msg}", icon="🔬")
+    st.success(f"BioGears OK — {bg_msg}", icon="✅")
 else:
     st.warning(f"Fallback active — {bg_msg}", icon="⚠️")
 
 
 # ── HUD Metric Cards ───────────────────────────────────────────────────────────
-status_hud = {"SAFE": "green", "MONITOR": "amber", "ABORT": "red"}.get(status_label, "cyan")
+status_hud  = {"SAFE": "green", "MONITOR": "amber", "ABORT": "red"}.get(status_label, "cyan")
 status_ping = {"SAFE": "green", "MONITOR": "amber", "ABORT": "red"}.get(status_label, "green")
-trend_sym  = {"Rising": "▲", "Falling": "▼", "Stable": "■"}.get(analytics["trend_label"], "—")
-trend_cls  = {"Rising": "up", "Falling": "down", "Stable": ""}.get(analytics["trend_label"], "")
-delta_cls  = "up" if peak_f > threshold else "down"
-delta_val  = peak_f - threshold
+trend_sym   = {"Rising": "^", "Falling": "v", "Stable": "="}.get(analytics["trend_label"], "-")
+trend_cls   = {"Rising": "up", "Falling": "down", "Stable": ""}.get(analytics["trend_label"], "")
+delta_cls   = "up" if peak_f > threshold else "down"
+delta_val   = peak_f - threshold
 
 st.markdown(f"""
 <div class="metric-grid">
-
   <div class="metric-card {status_hud}">
     <span class="c tl"></span><span class="c tr"></span>
     <span class="c bl"></span><span class="c br"></span>
@@ -882,7 +1026,6 @@ st.markdown(f"""
     </div>
     <div class="hud-sub {trend_cls}">{trend_sym} {analytics["trend_label"]}</div>
   </div>
-
   <div class="metric-card orange">
     <span class="c tl"></span><span class="c tr"></span>
     <span class="c bl"></span><span class="c br"></span>
@@ -890,7 +1033,6 @@ st.markdown(f"""
     <div class="hud-value orange">{peak_f:.3f}</div>
     <div class="hud-sub {delta_cls}">{delta_val:+.3f} vs threshold</div>
   </div>
-
   <div class="metric-card cyan">
     <span class="c tl"></span><span class="c tr"></span>
     <span class="c bl"></span><span class="c br"></span>
@@ -898,7 +1040,6 @@ st.markdown(f"""
     <div class="hud-value cyan">H+{peak_h:02d}</div>
     <div class="hud-sub">of {mission_hours_actual}h mission</div>
   </div>
-
   <div class="metric-card purple">
     <span class="c tl"></span><span class="c tr"></span>
     <span class="c bl"></span><span class="c br"></span>
@@ -906,7 +1047,6 @@ st.markdown(f"""
     <div class="hud-value" style="color:var(--hud-purple)">{at_risk:.1f}<span style="font-size:1rem">%</span></div>
     <div class="hud-sub">above threshold</div>
   </div>
-
   <div class="metric-card red">
     <span class="c tl"></span><span class="c tr"></span>
     <span class="c bl"></span><span class="c br"></span>
@@ -914,98 +1054,67 @@ st.markdown(f"""
     <div class="hud-value red">{p_breach:.1f}<span style="font-size:1rem">%</span></div>
     <div class="hud-sub">{n_sims} MC trajectories</div>
   </div>
-
 </div>
 """, unsafe_allow_html=True)
 
 
-# ── I: HUD Tab navigation ──────────────────────────────────────────────────────
+# ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs([
-    "PHYSIO · OVERVIEW",
-    "RISK · ANALYSIS",
-    "DYNAMICS · PHASE",
-    "MC · SIMULATION",
+    "PHYSIO · OVERVIEW", "RISK · ANALYSIS", "DYNAMICS · PHASE", "MC · SIMULATION",
 ])
 
-
-# ── Tab 1: Mission Overview ────────────────────────────────────────────────────
 with tab1:
-    st.markdown('<div class="hud-section">Physiological Time-Series</div>',
-                unsafe_allow_html=True)
-    st.plotly_chart(
-        plot_mission_overview(mission_df, events, fatigue, bg_fatigue, threshold),
-        use_container_width=True,
-    )
-
+    st.markdown('<div class="hud-section">Physiological Time-Series</div>', unsafe_allow_html=True)
+    st.plotly_chart(plot_mission_overview(mission_df, events, fatigue, bg_fatigue, threshold),
+                    use_container_width=True)
     col_sched, col_bg = st.columns(2)
-
     with col_sched:
         with st.expander("// MISSION EVENT SCHEDULE"):
-            rows = []
-            for ev in events:
-                rows.append({
-                    "Event":     ev.event_type.value,
-                    "Start":     f"H+{ev.start_min // 60}h {ev.start_min % 60:02d}m",
-                    "End":       f"H+{ev.end_min   // 60}h {ev.end_min   % 60:02d}m",
-                    "Duration":  f"{ev.duration_min} min",
-                    "Intensity": f"{ev.intensity:.2f}",
-                })
-            st.dataframe(rows, use_container_width=True)
-
+            st.dataframe([{
+                "Event": ev.event_type.value,
+                "Start": f"H+{ev.start_min//60}h {ev.start_min%60:02d}m",
+                "End":   f"H+{ev.end_min//60}h {ev.end_min%60:02d}m",
+                "Dur":   f"{ev.duration_min} min",
+                "Intensity": f"{ev.intensity:.2f}",
+            } for ev in events], use_container_width=True)
     with col_bg:
         with st.expander("// BIOGEARS RAW EVA SEGMENT"):
-            src = "Live BioGears" if used_real else "Synthesised fallback"
-            st.caption(f"Source: {src} · Rows: {len(biogears_df)}")
+            st.caption(f"Source: {'Live' if used_real else 'Synth'} · Rows: {len(biogears_df)}")
             st.plotly_chart(plot_biogears_raw(biogears_df), use_container_width=True)
 
-
-# ── Tab 2: Risk Analysis ───────────────────────────────────────────────────────
 with tab2:
     col_gauge, col_info = st.columns([1, 2])
-
     with col_gauge:
         st.plotly_chart(make_risk_gauge(peak_f, threshold), use_container_width=True)
-
     with col_info:
-        st.markdown('<div class="hud-section">Fatigue Trend Analysis</div>',
-                    unsafe_allow_html=True)
-
+        st.markdown('<div class="hud-section">Fatigue Trend Analysis</div>', unsafe_allow_html=True)
         trend      = analytics["trend_label"]
-        trend_icon = {"Rising": "📈", "Falling": "📉", "Stable": "➡️"}.get(trend, "")
-
+        trend_icon = {"Rising": "Rising", "Falling": "Falling", "Stable": "Stable"}.get(trend, "")
         st.markdown(f"""
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.8rem">
-
-  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
-              padding:0.7rem 0.9rem;position:relative;
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);padding:0.7rem 0.9rem;
               clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
     <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
                 text-transform:uppercase;letter-spacing:0.12em">End-of-mission trend</div>
     <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-text);margin-top:0.2rem">
-      {trend_icon} {trend}</div>
+      {trend_icon}</div>
   </div>
-
-  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
-              padding:0.7rem 0.9rem;
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);padding:0.7rem 0.9rem;
               clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
     <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
-                text-transform:uppercase;letter-spacing:0.12em">Slope · per minute</div>
+                text-transform:uppercase;letter-spacing:0.12em">Slope / min</div>
     <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-text);margin-top:0.2rem">
       {analytics["trend_slope"]:.6f}</div>
   </div>
-
-  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
-              padding:0.7rem 0.9rem;
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);padding:0.7rem 0.9rem;
               clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
     <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
                 text-transform:uppercase;letter-spacing:0.12em">Peak fatigue</div>
     <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-orange);
                 text-shadow:var(--glow-orange);margin-top:0.2rem">
-      {peak_f:.4f} · H+{peak_h:02d}</div>
+      {peak_f:.4f} H+{peak_h:02d}</div>
   </div>
-
-  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
-              padding:0.7rem 0.9rem;
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);padding:0.7rem 0.9rem;
               clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
     <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
                 text-transform:uppercase;letter-spacing:0.12em">MC worst-case</div>
@@ -1013,122 +1122,81 @@ with tab2:
                 text-shadow:var(--glow-red);margin-top:0.2rem">
       {mc_sum["worst_case_fatigue"]:.4f}</div>
   </div>
-
 </div>
 """, unsafe_allow_html=True)
-
     st.markdown('<div class="hud-section">Risk Flag Log</div>', unsafe_allow_html=True)
     if risk_periods:
-        flag_rows = [
-            {
-                "Flag":         f"RF-{i:02d}",
-                "Start":        f"H+{s // 60}h {s % 60:02d}m",
-                "End":          f"H+{e // 60}h {e % 60:02d}m",
-                "Duration":     f"{e - s} min",
-                "Peak Fatigue": f"{fatigue[s:e].max():.4f}",
-            }
-            for i, (s, e) in enumerate(risk_periods, 1)
-        ]
-        st.dataframe(flag_rows, use_container_width=True)
+        st.dataframe([{
+            "Flag": f"RF-{i:02d}",
+            "Start": f"H+{s//60}h {s%60:02d}m",
+            "End":   f"H+{e//60}h {e%60:02d}m",
+            "Duration": f"{e-s} min",
+            "Peak Fatigue": f"{fatigue[s:e].max():.4f}",
+        } for i, (s, e) in enumerate(risk_periods, 1)], use_container_width=True)
     else:
         st.success("// NO RISK THRESHOLD BREACHES DETECTED", icon="✅")
-
     peak_idx = analytics["peak_minute"]
     st.markdown('<div class="hud-section">Physiological State at Peak Fatigue</div>',
                 unsafe_allow_html=True)
     row      = mission_df.iloc[peak_idx]
-    spo2_val = row["OxygenSaturation"]
-    if spo2_val <= 1.05:
-        spo2_val *= 100
-
+    spo2_val = row["OxygenSaturation"] * 100 if row["OxygenSaturation"] <= 1.05 else row["OxygenSaturation"]
     pc1, pc2, pc3, pc4 = st.columns(4)
     pc1.metric("Heart Rate",   f"{row['HeartRate']:.1f} bpm")
-    pc2.metric("SpO₂",         f"{spo2_val:.2f}%")
-    pc3.metric("Core Temp",    f"{row['CoreTemperature']:.2f}°C")
-    pc4.metric("Mission Time", f"H+{peak_idx // 60}h {peak_idx % 60:02d}m")
+    pc2.metric("SpO2",         f"{spo2_val:.2f}%")
+    pc3.metric("Core Temp",    f"{row['CoreTemperature']:.2f} C")
+    pc4.metric("Mission Time", f"H+{peak_idx//60}h {peak_idx%60:02d}m")
 
-
-# ── Tab 3: Phase Space ─────────────────────────────────────────────────────────
 with tab3:
-    st.markdown('<div class="hud-section">HR vs Fatigue Phase Space</div>',
-                unsafe_allow_html=True)
-    st.caption(
-        "// Each point = one mission minute · colour = mission time (dark→early, bright→late) "
-        "· red band = risk zone · trajectory reveals workload-fatigue coupling"
-    )
-    st.plotly_chart(
-        plot_phase_space(mission_df, fatigue, threshold),
-        use_container_width=True,
-    )
+    st.markdown('<div class="hud-section">HR vs Fatigue Phase Space</div>', unsafe_allow_html=True)
+    st.caption("// Each point = 1 mission minute · colour = time · red band = risk zone")
+    st.plotly_chart(plot_phase_space(mission_df, fatigue, threshold), use_container_width=True)
 
-
-# ── Tab 4: Monte Carlo ─────────────────────────────────────────────────────────
 with tab4:
-    st.markdown(
-        f'<div class="hud-section">Monte Carlo · {n_sims} Trajectories</div>',
-        unsafe_allow_html=True,
-    )
-
+    st.markdown(f'<div class="hud-section">Monte Carlo · {n_sims} Trajectories</div>',
+                unsafe_allow_html=True)
     mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("P(any breach)",    f"{mc_sum['p_any_breach']*100:.1f}%",
-               help="Fraction of MC runs that crossed threshold")
+    mc1.metric("P(any breach)",     f"{mc_sum['p_any_breach']*100:.1f}%")
     mc2.metric("Mean peak fatigue", f"{mc_sum['mean_peak_fatigue']:.4f}")
     mc3.metric("Worst-case",        f"{mc_sum['worst_case_fatigue']:.4f}")
-
     st.plotly_chart(plot_monte_carlo_envelope(mc, threshold), use_container_width=True)
-
     st.markdown('<div class="hud-section">Simulation Heatmap</div>', unsafe_allow_html=True)
-    st.caption("// Each row = one simulation · red = high fatigue · green = nominal")
     st.plotly_chart(plot_risk_heatmap(mc), use_container_width=True)
-
     with st.expander("// PEAK FATIGUE DISTRIBUTION"):
         import plotly.graph_objects as _pgo
-
-        hist_fig = _pgo.Figure()
-        hist_fig.add_trace(_pgo.Histogram(
-            x=mc["max_per_sim"],
-            nbinsx=30,
-            marker=dict(color="#ff6b00", opacity=0.75,
-                        line=dict(color="#0c2040", width=0.5)),
-            name="Peak fatigue",
+        hfig = _pgo.Figure()
+        hfig.add_trace(_pgo.Histogram(
+            x=mc["max_per_sim"], nbinsx=30,
+            marker=dict(color="#ff6b00", opacity=0.75, line=dict(color="#0c2040", width=0.5)),
             hovertemplate="Fatigue %{x:.3f} · %{y} runs<extra></extra>",
         ))
-        hist_fig.add_vline(
-            x=threshold, line=dict(color="#ff1a3c", dash="dash", width=2),
-            annotation_text=f" Threshold {threshold:.2f}",
-            annotation_font=dict(color="#ff1a3c", size=10, family="Share Tech Mono"),
-            annotation_position="top right",
-        )
-        hist_fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="#060c18",
-            plot_bgcolor="#030608",
-            height=300,
-            margin=dict(t=36, b=36, l=48, r=24),
-            title=dict(text="// PEAK FATIGUE DISTRIBUTION · MC RUNS",
-                       font=dict(size=11, family="Share Tech Mono", color="#1e4060"), x=0.01),
-            xaxis=dict(title_text="Peak Fatigue", gridcolor="rgba(0,212,255,0.04)",
-                       linecolor="#0c2040", tickfont=dict(family="Share Tech Mono", size=10)),
-            yaxis=dict(title_text="Count", gridcolor="rgba(0,212,255,0.04)",
-                       linecolor="#0c2040", tickfont=dict(family="Share Tech Mono", size=10)),
-            bargap=0.06,
-            font=dict(family="Share Tech Mono", color="#1e4060"),
-        )
-        st.plotly_chart(hist_fig, use_container_width=True)
+        hfig.add_vline(x=threshold, line=dict(color="#ff1a3c", dash="dash", width=2),
+                       annotation_text=f" Threshold {threshold:.2f}",
+                       annotation_font=dict(color="#ff1a3c", size=10, family="Share Tech Mono"),
+                       annotation_position="top right")
+        hfig.update_layout(template="plotly_dark", paper_bgcolor="#060c18",
+                           plot_bgcolor="#030608", height=300,
+                           margin=dict(t=36, b=36, l=48, r=24),
+                           title=dict(text="// PEAK FATIGUE DISTRIBUTION",
+                                      font=dict(size=11, family="Share Tech Mono", color="#1e4060"), x=0.01),
+                           xaxis=dict(gridcolor="rgba(0,212,255,0.04)", linecolor="#0c2040",
+                                      tickfont=dict(family="Share Tech Mono", size=10)),
+                           yaxis=dict(gridcolor="rgba(0,212,255,0.04)", linecolor="#0c2040",
+                                      tickfont=dict(family="Share Tech Mono", size=10)),
+                           bargap=0.06, font=dict(family="Share Tech Mono", color="#1e4060"))
+        st.plotly_chart(hfig, use_container_width=True)
 
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div style="margin-top:1.5rem;padding:0.6rem 0;
-            border-top:1px solid var(--hud-border);
+<div style="margin-top:1.5rem;padding:0.6rem 0;border-top:1px solid var(--hud-border);
             display:flex;justify-content:space-between;align-items:center">
   <span style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-dim);
                letter-spacing:0.12em;text-transform:uppercase">
-    AstroGuard · BioGears 8.2.0 · Musculoskeletal Fatigue &amp; Injury Risk
+    AstroGuard &middot; BioGears 8.2.0 &middot; Musculoskeletal Fatigue &amp; Injury Risk
   </span>
   <span style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-dim);
                letter-spacing:0.12em;text-transform:uppercase">
-    RESPOND Basket 2025 · RES-HSFC-2025-001
+    RESPOND Basket 2025 &middot; RES-HSFC-2025-001
   </span>
 </div>
 """, unsafe_allow_html=True)
