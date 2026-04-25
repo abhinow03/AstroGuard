@@ -180,6 +180,49 @@ def _glycogen_replenish(
     return min(per_min_absorbed_g, deficit_g * _GLY_RESYNTHESIS_RATE * 60)
 
 
+# ── Hydration model ──────────────────────────────────────────────────────────
+#
+# In microgravity, aldosterone regulation is dysregulated and sodium retention
+# is elevated, causing fluid to redistribute cephalad. Higher sodium intake
+# increases the effective water requirement to maintain plasma osmolarity.
+#
+# Sources:
+#   NASA TM-2015-218570 — "Water requirements in space"
+#   Drummer et al. (2000) — sodium/fluid retention on ISS
+#   NASA HSMO guidelines — minimum 2.0 L/day in space (vs 1.5 L ground)
+
+_WATER_NEED_BASE_L        = 2.0    # L/day NASA minimum for spaceflight
+_SODIUM_REFERENCE_MG      = 1500.0 # mg/day below which no extra water needed
+_SODIUM_WATER_COUPLING    = 1.5e-4  # L extra water needed per mg sodium above reference
+
+
+def _hydration_state(daily_water_L: float, sodium_mg_per_day: float) -> float:
+    """
+    Compute instantaneous hydration level [0, 1] from daily intake and sodium.
+
+    Sodium above 1500 mg/day raises the effective water requirement because
+    higher osmolarity requires more water to maintain plasma volume in
+    microgravity (reduced diuresis means sodium is retained longer).
+
+    Returns 1.0 when water intake equals or exceeds requirement; falls linearly
+    to 0.0 at zero water intake.
+    """
+    sodium_excess      = max(0.0, sodium_mg_per_day - _SODIUM_REFERENCE_MG)
+    effective_need_L   = _WATER_NEED_BASE_L + sodium_excess * _SODIUM_WATER_COUPLING
+    return float(np.clip(daily_water_L / effective_need_L, 0.0, 1.0))
+
+
+def _hydration_penalty(hydration: float) -> float:
+    """
+    Fatigue accumulation multiplier from dehydration.
+
+    At full hydration (1.0) → no penalty (×1.0).
+    At zero hydration     → maximum penalty (×1.4).
+    Range [1.0, 1.4] matching the prior model — now driven by real water/sodium inputs.
+    """
+    return 1.0 + 0.4 * (1.0 - float(np.clip(hydration, 0.0, 1.0)))
+
+
 def normalise_biogears_fatigue(biogears_df, mission_min: int) -> np.ndarray:
     """
     Resample BioGears' own FatigueLevel (seconds resolution) to the
