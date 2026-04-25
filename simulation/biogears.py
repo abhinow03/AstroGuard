@@ -401,22 +401,72 @@ def _pc_indent(elem: ET.Element, level: int = 0) -> None:
             elem.tail = pad
 
 
+def _load_precomputed_xml(xml_path: Path) -> "pd.DataFrame | None":
+    """
+    Parse a precomputed BioGears XML file back into a DataFrame.
+
+    Reads the <Columns> block to recover column order, then reads each <Row>
+    collecting <V c='ColName'>value</V> elements. Returns None on any parse
+    error so callers can fall through gracefully.
+    """
+    try:
+        root    = ET.parse(str(xml_path)).getroot()
+        cols_el = root.find(f"{{{_PC_NS}}}Columns")
+        if cols_el is None:
+            return None
+        columns = [c.get("name", "") for c in cols_el.findall(f"{{{_PC_NS}}}Column")]
+        if not columns:
+            return None
+
+        rows_el = root.find(f"{{{_PC_NS}}}Rows")
+        if rows_el is None:
+            return None
+
+        records = []
+        for row_el in rows_el.findall(f"{{{_PC_NS}}}Row"):
+            record: dict = {}
+            for v_el in row_el.findall(f"{{{_PC_NS}}}V"):
+                col = v_el.get("c", "")
+                if col:
+                    record[col] = float((v_el.text or "0").strip())
+            records.append(record)
+
+        if not records:
+            return None
+
+        df = pd.DataFrame(records, columns=columns)
+        return df.dropna(subset=["Time_s", "HeartRate"]).reset_index(drop=True)
+    except Exception:
+        return None
+
+
 def _load_precomputed(eva_intensity: float) -> Tuple["pd.DataFrame | None", str]:
     """
-    Load the nearest precomputed CSV, blending two adjacent intensities if needed.
+    Load the nearest precomputed XML, blending two adjacent intensities if needed.
 
-    Files are named intensity_050.csv (= 0.50), intensity_070.csv (= 0.70), etc.
-    Blending: linear interpolation column-by-column between the two bounding CSVs.
+    Files are named intensity_050.xml (= 0.50), intensity_070.xml (= 0.70), etc.
+    Blending: linear interpolation column-by-column between the two bounding files.
+    Falls back to legacy .csv files if no XML files are found (migration path).
     """
     if not PRECOMPUTED_DIR.exists():
         return None, "precomputed/ directory not found"
 
-    csvs = sorted(PRECOMPUTED_DIR.glob("intensity_*.csv"))
-    if not csvs:
-        return None, "No precomputed CSVs in precomputed/ — run Live BioGears at least once"
+    xmls = sorted(PRECOMPUTED_DIR.glob("intensity_*.xml"))
+    if not xmls:
+        # Legacy CSV fallback — migrate old sessions that only have CSV files
+        csvs = sorted(PRECOMPUTED_DIR.glob("intensity_*.csv"))
+        if not csvs:
+            return None, "No precomputed files — run Live BioGears at least once"
+        xmls_or_csvs = csvs
+        loader = _parse_csv
+        ext_label = "CSV (legacy)"
+    else:
+        xmls_or_csvs = xmls
+        loader = _load_precomputed_xml
+        ext_label = "XML"
 
     available: dict[float, Path] = {}
-    for p in csvs:
+    for p in xmls_or_csvs:
         try:
             val = int(p.stem.split("_")[1]) / 100.0
             available[val] = p
@@ -424,28 +474,26 @@ def _load_precomputed(eva_intensity: float) -> Tuple["pd.DataFrame | None", str]
             continue
 
     if not available:
-        return None, "Could not parse precomputed CSV filenames"
+        return None, "Could not parse precomputed filenames"
 
     keys = sorted(available)
 
-    # Exact match or clamp to edges
     if eva_intensity <= keys[0]:
-        df = _parse_csv(available[keys[0]])
-        return df, f"Precomputed CSV  intensity={keys[0]:.2f}"
+        df = loader(available[keys[0]])
+        return df, f"Precomputed {ext_label} intensity={keys[0]:.2f}"
     if eva_intensity >= keys[-1]:
-        df = _parse_csv(available[keys[-1]])
-        return df, f"Precomputed CSV  intensity={keys[-1]:.2f}"
+        df = loader(available[keys[-1]])
+        return df, f"Precomputed {ext_label} intensity={keys[-1]:.2f}"
 
-    # Blend between surrounding pair
     for j in range(len(keys) - 1):
         lo, hi = keys[j], keys[j + 1]
         if lo <= eva_intensity <= hi:
             alpha  = (eva_intensity - lo) / (hi - lo)
-            df_lo  = _parse_csv(available[lo])
-            df_hi  = _parse_csv(available[hi])
+            df_lo  = loader(available[lo])
+            df_hi  = loader(available[hi])
             if df_lo is None or df_hi is None:
                 break
-            n = min(len(df_lo), len(df_hi))
+            n        = min(len(df_lo), len(df_hi))
             df_blend = df_lo.iloc[:n].copy().reset_index(drop=True)
             for col in df_lo.columns:
                 if col != "Time_s" and col in df_hi.columns:
@@ -453,7 +501,7 @@ def _load_precomputed(eva_intensity: float) -> Tuple["pd.DataFrame | None", str]
                         (1 - alpha) * df_lo[col].values[:n]
                         + alpha     * df_hi[col].values[:n]
                     )
-            return df_blend, f"Precomputed blend {lo:.2f}→{hi:.2f} @ {eva_intensity:.2f}"
+            return df_blend, f"Precomputed {ext_label} blend {lo:.2f}->{hi:.2f} @ {eva_intensity:.2f}"
 
     return None, "Precomputed blend failed"
 
