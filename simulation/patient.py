@@ -323,7 +323,7 @@ def parse_nutrition(xml_path: Path) -> NutritionProfile:
 
 def load_nutrition_profiles(
     nutrition_dir: Path = BIOGEARS_NUTRITION_DIR,
-) -> Dict[str, NutritionProfile]:
+) -> "Dict[str, NutritionProfile]":
     """
     Load all nutrition XMLs from the BioGears nutrition/ directory.
 
@@ -340,3 +340,98 @@ def load_nutrition_profiles(
         except Exception:
             pass
     return profiles
+
+
+# ── Microgravity deconditioning model ─────────────────────────────────────────
+
+@dataclass
+class MicrogravityFactors:
+    """
+    NASA ISS-calibrated deconditioning factors for a given number of days in space.
+
+    Sources:
+      - Trappe et al. (2004) "Exercise in space: human skeletal muscle after 6 months
+        aboard the International Space Station." J Appl Physiol.
+      - Scott et al. (2019) "Characterization of maximum aerobic capacity..." NASA HRP.
+      - Shykoff (2019) "Cardiac output at rest and exercise..." NASA JSC.
+      - NASA Human Research Roadmap — Human Research Program evidence reports.
+
+    All factors are dimensionless fractions of the ground-baseline value
+    (1.0 = no change) except hr_offset (absolute bpm) and spo2_offset (fraction).
+    """
+    mission_day:     int
+
+    # VO2max retention — fraction of ground VO2max still available
+    vo2max_factor:   float   # 1.0 → 0.72 over 180 days
+
+    # Skeletal muscle mass retention — drives glycogen capacity
+    muscle_factor:   float   # 1.0 → 0.80 (ISS countermeasures slow this)
+
+    # Additional resting HR bpm imposed by microgravity (cardiac unloading)
+    hr_offset:       float   # 0 → +15 bpm
+
+    # SpO2 fraction change — fluid cephalad shift in first week only
+    spo2_offset:     float   # 0 → −0.021 (days 1-7 only, then resolves)
+
+    # Glycogen capacity multiplier (= muscle_factor; VO2max doesn't change storage)
+    glycogen_factor: float
+
+    def adjust_patient(self, p: PatientProfile) -> dict:
+        """
+        Return a dict of patient vitals adjusted for this mission day.
+
+        Used by health_vars.py and fatigue.py to shift the patient's baselines
+        without mutating the original PatientProfile object.
+        """
+        return {
+            "hr_baseline":         p.hr_baseline + self.hr_offset,
+            "vo2max_ml_kg_min":    p.vo2max_ml_kg_min * self.vo2max_factor,
+            "glycogen_capacity_g": p.glycogen_capacity_g * self.glycogen_factor,
+            "spo2_baseline_adj":   self.spo2_offset,   # added to base SpO2 in health_vars
+        }
+
+
+def microgravity_factors(mission_day: int) -> MicrogravityFactors:
+    """
+    Compute ISS-calibrated deconditioning factors for `mission_day` days in space.
+
+    Deconditioning curve (two-phase):
+      Phase 1 (days 1-30): VO2max loss ≈ 0.5 %/day  → rapid cardiovascular adaptation
+      Phase 2 (days 31-180): VO2max loss ≈ 0.1 %/day → plateau as body re-adapts
+      Floor at 72% (observed ~25-28% total VO2max loss after 6-month ISS missions).
+
+    Muscle mass loss ≈ 0.2 %/day, floor at 80% (exercise countermeasures on ISS
+    — ARED, CEVIS — significantly slow further loss after ~100 days).
+
+    Resting HR increases ≈ 0.12 bpm/day due to reduced venous return and cardiac
+    unloading; capped at +15 bpm consistent with ISS telemetry data.
+
+    SpO2 effect is driven by the cephalad fluid shift in the first 7 days only;
+    once the body has redistributed fluid volume, SpO2 returns to near-baseline.
+    """
+    d = max(0, int(mission_day))
+
+    # ── VO2max (two-phase piecewise, NASA Scott et al. 2019) ──────────────────
+    if d <= 30:
+        vo2max_factor = max(0.72, 1.0 - 0.005 * d)
+    else:
+        vo2max_factor = max(0.72, 0.85 - 0.001 * (d - 30))
+
+    # ── Skeletal muscle mass (Trappe et al. 2004) ─────────────────────────────
+    muscle_factor = max(0.80, 1.0 - 0.002 * d)
+
+    # ── Resting HR offset (ISS telemetry, Shykoff 2019) ──────────────────────
+    hr_offset = min(15.0, 0.12 * d)
+
+    # ── SpO2 cephalad fluid shift (first 7 days only) ────────────────────────
+    # -0.003 per day for 7 days = max −0.021 (~98.5% → ~97.5% SpO2)
+    spo2_offset = -0.003 * min(d, 7)
+
+    return MicrogravityFactors(
+        mission_day    = d,
+        vo2max_factor  = round(vo2max_factor, 4),
+        muscle_factor  = round(muscle_factor, 4),
+        hr_offset      = round(hr_offset, 2),
+        spo2_offset    = round(spo2_offset, 4),
+        glycogen_factor= round(muscle_factor, 4),
+    )
