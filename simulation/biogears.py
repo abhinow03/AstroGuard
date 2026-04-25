@@ -536,7 +536,7 @@ def get_biogears_segment(
     # Live mode
     df, msg = run_biogears(eva_intensity, progress_callback=progress_callback)
     if df is not None and len(df) > 20:
-        _save_precomputed(df, eva_intensity)   # cache for future CSV-mode use
+        _save_precomputed_xml(df, eva_intensity)   # cache for future XML-mode use
         return df, True, msg
 
     fallback_df = _load_fallback(eva_intensity, BG_EVA_DURATION_MIN, BG_RECOVERY_MIN)
