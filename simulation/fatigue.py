@@ -123,6 +123,63 @@ def compute_fatigue(
     return fatigue, risk_periods
 
 
+# ── Glycogen state engine ─────────────────────────────────────────────────────
+#
+# Glycogen is the primary muscle fuel during EVA. BioGears tracks MuscleGlycogen
+# directly (output column). Here we model it as a running state variable that
+# depletes during EVA and replenishes during rest when carbohydrates are available.
+#
+# Sources:
+#   Brooks et al. "Exercise Physiology" 8th ed. — ~15 g glycogen / kg lean mass
+#   Burke et al. (2011) IJSNEM — carbohydrate oxidation rates during aerobic work
+#   Ivy et al. (1988) J Appl Physiol — post-exercise glycogen resynthesis rates
+
+# Depletion: aerobic exercise at moderate intensity burns ~2.8 g/min of glycogen
+# per unit EVA intensity (based on RER ~0.92 at 70% VO2max, carb contribution ~60%).
+_GLY_DEPLETION_PER_MIN   = 2.8    # g / min / intensity_unit
+
+# Replenishment: during rest with adequate carb intake, muscle glycogen resynthesises
+# at ~5% of remaining deficit per hour (Ivy et al. 1988). We approximate this per
+# minute as a fraction of daily carbohydrate absorbed (70% bioavailability assumed).
+_GLY_ABSORPTION_FRACTION = 0.70   # fraction of ingested carbs absorbed by muscle
+_GLY_RESYNTHESIS_RATE    = 5e-4   # fractional resynthesis per minute during rest
+
+
+def _glycogen_init(lean_mass_kg: float, glycogen_factor: float = 1.0) -> float:
+    """
+    Initial glycogen store in grams.
+
+    Capacity = lean_mass × 15 g/kg, then scaled by microgravity muscle_factor
+    (muscle atrophy reduces total glycogen capacity over time in space).
+    """
+    return lean_mass_kg * 15.0 * glycogen_factor
+
+
+def _glycogen_depletion(intensity: float) -> float:
+    """Return grams of glycogen burned per minute at given EVA intensity."""
+    return _GLY_DEPLETION_PER_MIN * float(np.clip(intensity, 0.0, 1.0))
+
+
+def _glycogen_replenish(
+    glycogen_g: float,
+    glycogen_max: float,
+    carb_g_per_meal: float,
+    meals_per_day: float,
+) -> float:
+    """
+    Return grams of glycogen added per minute during rest/sleep.
+
+    Converts daily carbohydrate intake → per-minute absorbed carbs →
+    glycogen resynthesis rate, capped so stores never exceed maximum.
+    """
+    if glycogen_g >= glycogen_max:
+        return 0.0
+    daily_carb_g       = carb_g_per_meal * meals_per_day
+    per_min_absorbed_g = (daily_carb_g * _GLY_ABSORPTION_FRACTION) / (24 * 60)
+    deficit_g          = glycogen_max - glycogen_g
+    return min(per_min_absorbed_g, deficit_g * _GLY_RESYNTHESIS_RATE * 60)
+
+
 def normalise_biogears_fatigue(biogears_df, mission_min: int) -> np.ndarray:
     """
     Resample BioGears' own FatigueLevel (seconds resolution) to the
