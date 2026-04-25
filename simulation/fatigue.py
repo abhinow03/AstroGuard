@@ -1,126 +1,181 @@
 """
 Mission-level fatigue accumulation model.
 
-Unified equation incorporating:
-  - Microgravity deconditioning factor D = 1 + 0.008 × mission_day
-  - Hydration penalty  (dehydration makes fatigue accumulate faster)
-  - Food/caloric boost (good nutrition speeds recovery)
-  - HR-normalised effort signal for EVA accumulation
-  - Fixed sleep recovery, passive rest recovery
+Fatigue is computed from five physiological drivers, all grounded in
+BioGears patient data and NASA ISS research — no abstract sliders:
+
+  1. Glycogen depletion/replenishment  (carbs_g, meals, lean mass)
+  2. Hydration state with sodium penalty (water_L, sodium_mg)
+  3. Sleep debt accumulation            (sleep_hours, mission_day)
+  4. Protein recovery adequacy          (protein_g, weight_kg)
+  5. Microgravity deconditioning        (MicrogravityFactors from patient.py)
 
 BioGears' own FatigueLevel is displayed alongside this model in the UI.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import numpy as np
 
 from simulation.events import EventType, MissionEvent, get_event_at_minute
 
+if TYPE_CHECKING:
+    from simulation.patient import MicrogravityFactors, PatientProfile
 
-# ── Base rate constants (per minute, Earth physiology, fully hydrated/fed) ──────
-_RATE_EVA_ACCUMULATE  = 0.0080   # × D × hr_norm × hydration_penalty
-_RATE_SLEEP_RECOVER   = 0.0060   # ÷ D × recovery_boost
-_RATE_PASSIVE_RECOVER = 0.0020   # ÷ D × (1 − hr_norm) × recovery_boost
+
+# ── Base rate constants (per minute, Earth physiology baseline) ─────────────
+_RATE_EVA_ACCUMULATE  = 0.0080   # scaled by VO2max degradation + all penalties
+_RATE_SLEEP_RECOVER   = 0.0060   # scaled by VO2max factor, protein, sleep hours
+_RATE_PASSIVE_RECOVER = 0.0020   # passive rest recovery
 
 
 def compute_fatigue(
-    hr_arr: np.ndarray,
-    events: List[MissionEvent],
-    threshold: float = 0.80,
-    baseline_hr: float = 72.0,
-    max_hr: float = 200.0,
-    mission_day: int = 0,
-    hydration_arr: Optional[np.ndarray] = None,
-    food_arr: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+    hr_arr:             np.ndarray,
+    events:             List[MissionEvent],
+    threshold:          float = 0.80,
+    # ── Patient profile (replaces bare baseline_hr / max_hr) ─────────────────
+    patient:            Optional["PatientProfile"]        = None,
+    mg_factors:         Optional["MicrogravityFactors"]   = None,
+    # ── Macronutrient inputs (BioGears NutritionProfile units) ───────────────
+    carb_g_per_meal:    float = 130.0,   # g  — BioGears Carbohydrate field
+    protein_g_per_meal: float = 20.0,    # g  — BioGears Protein field
+    meals_per_day:      float = 3.0,
+    daily_water_L:      float = 2.0,     # L  — BioGears Water field
+    sodium_mg_per_day:  float = 1000.0,  # mg — BioGears Sodium field (normalised)
+    sleep_hours:        float = 8.0,     # hr — BioGears SleepAmount field
+    # ── Legacy / backward-compat fallback ────────────────────────────────────
+    mission_day:        int   = 0,       # used only when mg_factors is None
+    baseline_hr:        float = 72.0,    # used only when patient is None
+    max_hr:             float = 200.0,   # used only when patient is None
+    # ── Kept for API compat (ignored — glycogen replaces this) ───────────────
+    hydration_arr:      Optional[np.ndarray] = None,
+    food_arr:           Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
     """
-    Compute per-minute fatigue for the mission timeline.
+    Compute per-minute fatigue and glycogen fraction for the mission timeline.
 
     Parameters
     ----------
-    hr_arr        : heart-rate array at 1-minute resolution
-    events        : list of MissionEvent from the event engine
-    threshold     : risk threshold (fatigue > threshold → at risk)
-    baseline_hr   : resting HR used to normalise the effort signal
-    max_hr        : theoretical maximum HR (upper bound for normalisation)
-    mission_day   : days the astronaut has been in microgravity before EVA.
-                    Drives deconditioning factor D = 1 + 0.008 × mission_day.
-    hydration_arr : per-minute hydration level [0, 1]. 1 = fully hydrated.
-                    Defaults to all-ones (no effect) if not provided.
-    food_arr      : per-minute caloric/food level [0, 1]. 1 = well-fed.
-                    Defaults to all-ones (no effect) if not provided.
+    hr_arr             : heart-rate array at 1-minute resolution [mission_min]
+    events             : MissionEvent list from the event engine
+    threshold          : risk threshold [0, 1] — fatigue above this = at risk
+    patient            : PatientProfile from patient.py (supplies HR baseline,
+                         lean mass, weight_kg, hr_max)
+    mg_factors         : MicrogravityFactors from patient.microgravity_factors()
+                         (supplies vo2max_factor, glycogen_factor, hr_offset)
+    carb_g_per_meal    : grams carbohydrate per meal (BioGears Carbohydrate)
+    protein_g_per_meal : grams protein per meal (BioGears Protein)
+    meals_per_day      : number of meals per day
+    daily_water_L      : total water intake in litres/day (BioGears Water)
+    sodium_mg_per_day  : total sodium in mg/day (BioGears Sodium, normalised)
+    sleep_hours        : hours of sleep per night (BioGears SleepAmount)
+    mission_day        : days in space — used to build mg_factors if not supplied
 
     Fatigue update equations
     ------------------------
-    D = 1 + 0.008 × mission_day                          (deconditioning)
-    hydration_penalty = 1 + 0.4 × (1 − hydration[i])    (1.0–1.4)
-    recovery_boost    = 0.6 + 0.4 × food[i]             (0.6–1.0)
+    hr_norm  = (HR[i] − hr_baseline_mg) / (hr_max − hr_baseline_mg)   clipped [0,1]
+    glycogen_fraction = glycogen_g / glycogen_max                       [0,1]
 
-    EVA:   Δ = +0.008 × D × hr_norm × hydration_penalty
-    Sleep: Δ = −0.006 ÷ D × recovery_boost
-    Rest:  Δ = −0.002 ÷ D × (1 − hr_norm) × recovery_boost
+    EVA:   Δ = R_eva × (hr_norm / vo2max_factor) × hydration_penalty
+                      × (1 + 0.6×(1−glycogen_fraction)) × sleep_debt_penalty
+    Sleep: Δ = −R_sleep × vo2max_factor × protein_recovery × (sleep_hours/8)
+    Rest:  Δ = −R_rest  × (1−hr_norm) × protein_recovery / sleep_debt_penalty
 
     Returns
     -------
-    fatigue      : float array [0, 1], shape = (mission_min,)
-    risk_periods : list of (start_min, end_min) tuples for continuous risk windows
+    fatigue          : float array [0, 1], shape = (mission_min,)
+    glycogen_fraction: float array [0, 1], shape = (mission_min,)
+    risk_periods     : list of (start_min, end_min) continuous risk windows
     """
+    from simulation.patient import microgravity_factors as _mg_factors
+
     mission_min = len(hr_arr)
-    fatigue = np.zeros(mission_min)
 
-    # Microgravity deconditioning — grows with days spent in space
-    D = 1.0 + 0.008 * max(0, mission_day)
+    # ── Resolve patient parameters ────────────────────────────────────────────
+    if patient is not None:
+        p_baseline_hr = patient.hr_baseline
+        p_hr_max      = patient.hr_max
+        p_lean_mass   = patient.lean_mass_kg
+        p_weight_kg   = patient.weight_kg
+    else:
+        p_baseline_hr = baseline_hr
+        p_hr_max      = max_hr
+        p_lean_mass   = 60.9   # StandardMale default
+        p_weight_kg   = 77.0
 
-    # Default to neutral (no penalty / no boost) if arrays not supplied
-    if hydration_arr is None:
-        hydration_arr = np.ones(mission_min)
-    if food_arr is None:
-        food_arr = np.ones(mission_min)
+    # ── Resolve microgravity factors ──────────────────────────────────────────
+    if mg_factors is None:
+        mg = _mg_factors(mission_day)
+    else:
+        mg = mg_factors
+
+    # Adjusted baselines after microgravity deconditioning
+    hr_baseline_mg  = p_baseline_hr + mg.hr_offset
+    vo2max_factor   = mg.vo2max_factor
+    glycogen_max    = _glycogen_init(p_lean_mass, mg.glycogen_factor)
+
+    # ── Pre-compute mission-constant scalars ──────────────────────────────────
+    hyd             = _hydration_state(daily_water_L, sodium_mg_per_day)
+    hyd_penalty     = _hydration_penalty(hyd)
+    prot_recovery   = _protein_recovery_factor(protein_g_per_meal, meals_per_day, p_weight_kg)
+    sleep_penalty   = _sleep_debt_penalty(sleep_hours, mission_day if mg_factors is None else mg.mission_day)
+
+    # ── Initial glycogen at mission start (assume 80% full — realistic pre-EVA) ─
+    glycogen_g      = glycogen_max * 0.80
+
+    # ── Output arrays ─────────────────────────────────────────────────────────
+    fatigue             = np.zeros(mission_min)
+    glycogen_fraction   = np.zeros(mission_min)
+    glycogen_fraction[0]= glycogen_g / glycogen_max
 
     for i in range(1, mission_min):
-        prev = fatigue[i - 1]
+        prev      = fatigue[i - 1]
+        hr_range  = max(p_hr_max - hr_baseline_mg, 1.0)
+        hr_norm   = float(np.clip((hr_arr[i] - hr_baseline_mg) / hr_range, 0.0, 1.0))
 
-        # HR normalised to workload fraction above resting baseline
-        hr_norm = float(np.clip(
-            (hr_arr[i] - baseline_hr) / max(max_hr - baseline_hr, 1.0),
-            0.0, 1.0,
-        ))
-
-        h = float(np.clip(hydration_arr[i], 0.0, 1.0))
-        f = float(np.clip(food_arr[i], 0.0, 1.0))
-
-        # Scalars derived from hydration and food
-        hydration_penalty = 1.0 + 0.4 * (1.0 - h)   # range [1.0, 1.4]
-        recovery_boost    = 0.6 + 0.4 * f             # range [0.6, 1.0]
+        gly_frac  = float(np.clip(glycogen_g / glycogen_max, 0.0, 1.0))
+        gly_penalty = 1.0 + 0.60 * (1.0 - gly_frac)   # empty glycogen = 60% harder
 
         ev = get_event_at_minute(events, i)
 
         if ev is not None and ev.event_type == EventType.EVA:
-            delta = _RATE_EVA_ACCUMULATE * D * hr_norm * hydration_penalty
+            delta      = (_RATE_EVA_ACCUMULATE
+                          * (hr_norm / max(vo2max_factor, 0.01))
+                          * hyd_penalty
+                          * gly_penalty
+                          * sleep_penalty)
+            glycogen_g = max(0.0, glycogen_g - _glycogen_depletion(ev.intensity))
+
         elif ev is not None and ev.event_type == EventType.SLEEP:
-            delta = -(_RATE_SLEEP_RECOVER / D) * recovery_boost
+            sleep_rate = _RATE_SLEEP_RECOVER * vo2max_factor * prot_recovery * (sleep_hours / 8.0)
+            delta      = -sleep_rate
+            glycogen_g = min(glycogen_max,
+                             glycogen_g + _glycogen_replenish(glycogen_g, glycogen_max,
+                                                              carb_g_per_meal, meals_per_day))
         else:
-            delta = -(_RATE_PASSIVE_RECOVER / D) * (1.0 - hr_norm) * recovery_boost
+            delta      = (-_RATE_PASSIVE_RECOVER * (1.0 - hr_norm)
+                          * prot_recovery / max(sleep_penalty, 0.01))
+            glycogen_g = min(glycogen_max,
+                             glycogen_g + _glycogen_replenish(glycogen_g, glycogen_max,
+                                                              carb_g_per_meal, meals_per_day))
 
-        fatigue[i] = float(np.clip(prev + delta, 0.0, 1.0))
+        fatigue[i]            = float(np.clip(prev + delta, 0.0, 1.0))
+        glycogen_fraction[i]  = float(np.clip(glycogen_g / glycogen_max, 0.0, 1.0))
 
-    # ── Identify continuous risk windows ──────────────────────────────────────
+    # ── Continuous risk windows ───────────────────────────────────────────────
     risk_periods: List[Tuple[int, int]] = []
-    in_risk = False
-    start = 0
-    for i, f_val in enumerate(fatigue):
-        if f_val > threshold and not in_risk:
-            in_risk = True
-            start = i
-        elif f_val <= threshold and in_risk:
+    in_risk, start = False, 0
+    for i, f in enumerate(fatigue):
+        if f > threshold and not in_risk:
+            in_risk, start = True, i
+        elif f <= threshold and in_risk:
             risk_periods.append((start, i))
             in_risk = False
     if in_risk:
         risk_periods.append((start, mission_min))
 
-    return fatigue, risk_periods
+    return fatigue, glycogen_fraction, risk_periods
 
 
 # ── Glycogen state engine ─────────────────────────────────────────────────────
