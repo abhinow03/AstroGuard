@@ -221,3 +221,122 @@ def get_patient(name: str, patients_dir: Path = BIOGEARS_PATIENTS_DIR) -> Option
         return parse_patient(xml_path)
     except Exception:
         return None
+
+
+# ── Nutrition profiles ─────────────────────────────────────────────────────────
+
+@dataclass
+class NutritionProfile:
+    """
+    Direct mapping of a BioGears nutrition XML.
+
+    The six fields here (Carbohydrate, Fat, Protein, Calcium, Sodium, Water)
+    are the exact inputs BioGears passes to its metabolic engine — they map
+    1-to-1 with what you would put in a ConsumeNutrients action in a scenario.
+
+    This is the "elemental level" the fatigue model uses: no more abstract
+    "meals per day" — these are the actual macronutrient substrates.
+    """
+    name:            str
+    carbohydrate_g:  float   # g per meal/serving
+    fat_g:           float   # g per meal/serving
+    protein_g:       float   # g per meal/serving
+    calcium_mg:      float   # mg per meal/serving
+    sodium_mg:       float   # mg per meal/serving  (normalised from g or mg)
+    water_L:         float   # L per meal/serving
+
+    @property
+    def calories(self) -> float:
+        """Atwater factors: carbs 4 kcal/g, protein 4 kcal/g, fat 9 kcal/g."""
+        return self.carbohydrate_g * 4.0 + self.protein_g * 4.0 + self.fat_g * 9.0
+
+    @property
+    def carb_pct(self) -> float:
+        return (self.carbohydrate_g * 4.0 / self.calories * 100) if self.calories else 0.0
+
+    @property
+    def protein_pct(self) -> float:
+        return (self.protein_g * 4.0 / self.calories * 100) if self.calories else 0.0
+
+    @property
+    def fat_pct(self) -> float:
+        return (self.fat_g * 9.0 / self.calories * 100) if self.calories else 0.0
+
+
+# BioGears reference nutrition — "StandardNutrition" per-meal values used as defaults
+STANDARD_NUTRITION = NutritionProfile(
+    name           = "StandardNutrition",
+    carbohydrate_g = 130.0,
+    fat_g          = 27.0,
+    protein_g      = 20.0,
+    calcium_mg     = 500.0,
+    sodium_mg      = 1000.0,
+    water_L        = 0.5,
+)
+
+# NASA ISS daily targets (for reference / slider annotations)
+NASA_DAILY_TARGETS = {
+    "carbohydrate_g": 370.0,   # ~50% of 3000 kcal
+    "protein_g":      120.0,   # ~1.6 g/kg for 75kg astronaut
+    "fat_g":          100.0,   # ~30% of 3000 kcal
+    "calcium_mg":    1200.0,   # elevated for bone loss countermeasure
+    "sodium_mg":     2300.0,   # NASA upper limit (fluid retention risk)
+    "water_L":          2.0,   # minimum; suit adds ~0.5L loss per EVA hour
+}
+
+
+def parse_nutrition(xml_path: Path) -> NutritionProfile:
+    """
+    Parse one BioGears nutrition XML into a NutritionProfile.
+
+    Handles the sodium unit ambiguity: some files store sodium in grams,
+    others in milligrams — detected from the `unit` attribute and normalised
+    to mg so downstream math is always in consistent units.
+    """
+    root = ET.parse(str(xml_path)).getroot()
+    name = _txt(root, "Name", xml_path.stem)
+
+    carb    = _val(root, "Carbohydrate", 0.0)
+    fat     = _val(root, "Fat",          0.0)
+    protein = _val(root, "Protein",      0.0)
+    calcium = _val(root, "Calcium",      0.0)
+    water   = _val(root, "Water",        0.0)
+
+    # Sodium: unit varies across nutrition files (g vs mg)
+    sodium_el = root.find(f"{{{_NS}}}Sodium")
+    sodium_mg = 0.0
+    if sodium_el is not None:
+        raw  = float(sodium_el.get("value", 0.0))
+        unit = sodium_el.get("unit", "mg")
+        sodium_mg = raw * 1000.0 if unit == "g" else raw
+
+    return NutritionProfile(
+        name           = name,
+        carbohydrate_g = carb,
+        fat_g          = fat,
+        protein_g      = protein,
+        calcium_mg     = calcium,
+        sodium_mg      = sodium_mg,
+        water_L        = water,
+    )
+
+
+def load_nutrition_profiles(
+    nutrition_dir: Path = BIOGEARS_NUTRITION_DIR,
+) -> Dict[str, NutritionProfile]:
+    """
+    Load all nutrition XMLs from the BioGears nutrition/ directory.
+
+    Returns a dict keyed by profile name. Falls back gracefully to an empty
+    dict if the directory does not exist (e.g. BioGears not installed).
+    """
+    profiles: Dict[str, NutritionProfile] = {}
+    if not nutrition_dir.exists():
+        return profiles
+    for xml_file in sorted(nutrition_dir.glob("*.xml")):
+        try:
+            n = parse_nutrition(xml_file)
+            profiles[n.name] = n
+        except Exception:
+            pass
+    return profiles
