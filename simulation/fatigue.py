@@ -223,6 +223,67 @@ def _hydration_penalty(hydration: float) -> float:
     return 1.0 + 0.4 * (1.0 - float(np.clip(hydration, 0.0, 1.0)))
 
 
+# ── Sleep debt accumulation ───────────────────────────────────────────────────
+#
+# ISS astronauts average 6.5h sleep/night against a target of 8h (NASA policy).
+# Chronic sleep restriction degrades cognitive and physical performance:
+#   - ~3% impairment per hour of daily sleep debt (Czeisler et al. 2006, Science)
+#   - Accumulates over the work week; partially cleared on "rest days" (Fridays on ISS)
+#
+# We model debt as weekly (7-day rolling) cumulative deficit, capped at 40% penalty
+# to avoid unphysical values during extended missions.
+
+_SLEEP_TARGET_H          = 8.0    # NASA target sleep hours per night
+_SLEEP_DEBT_IMPAIR_RATE  = 0.025  # performance loss per hour of cumulative deficit
+_SLEEP_DEBT_PENALTY_CAP  = 0.40   # maximum 40% increase in fatigue accumulation
+
+
+def _sleep_debt_penalty(sleep_hours: float, mission_day: int) -> float:
+    """
+    Fatigue multiplier from accumulated sleep debt [1.0, 1.40].
+
+    Debt accumulates over a 7-day rolling window (ISS work-week model).
+    At 6.5h/night for 7 days: debt = 10.5h → penalty = 1 + min(0.4, 10.5×0.025) = 1.26.
+    At 8h+/night: penalty = 1.0 (no debt).
+    """
+    daily_deficit_h  = max(0.0, _SLEEP_TARGET_H - float(sleep_hours))
+    # Rolling 7-day window — debt doesn't compound indefinitely (weekend recovery effect)
+    week_day         = (mission_day % 7) + 1
+    cumulative_h     = daily_deficit_h * week_day
+    return 1.0 + min(_SLEEP_DEBT_PENALTY_CAP, cumulative_h * _SLEEP_DEBT_IMPAIR_RATE)
+
+
+# ── Protein recovery factor ───────────────────────────────────────────────────
+#
+# NASA recommendation: 1.6 g/kg/day protein for EVA astronauts (muscle maintenance
+# in microgravity; standard RDA is 0.8 g/kg/day but EVA work increases demand).
+# Adequate protein → faster muscle glycogen replenishment and lower baseline fatigue
+# on subsequent mission days.
+#
+# Source: Stein & Blanc (2011) "Does protein supplementation prevent muscle
+#   disuse atrophy and loss of strength?" — NASA Human Research Program.
+
+_PROTEIN_TARGET_G_PER_KG = 1.6    # g protein per kg bodyweight per day (NASA EVA standard)
+
+
+def _protein_recovery_factor(
+    protein_g_per_meal: float,
+    meals_per_day: float,
+    weight_kg: float,
+) -> float:
+    """
+    Sleep/rest recovery speed multiplier [0.70, 1.0] based on protein adequacy.
+
+    At NASA-recommended 1.6 g/kg/day → factor = 1.0 (full recovery speed).
+    At 50% of recommendation    → factor ≈ 0.85.
+    At zero protein             → factor = 0.70 (30% slower recovery).
+    """
+    daily_protein_g  = float(protein_g_per_meal) * float(meals_per_day)
+    target_g         = _PROTEIN_TARGET_G_PER_KG * float(weight_kg)
+    adequacy         = float(np.clip(daily_protein_g / max(target_g, 1.0), 0.0, 1.0))
+    return 0.70 + 0.30 * adequacy
+
+
 def normalise_biogears_fatigue(biogears_df, mission_min: int) -> np.ndarray:
     """
     Resample BioGears' own FatigueLevel (seconds resolution) to the
