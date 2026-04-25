@@ -617,189 +617,208 @@ st.markdown("""
 
 
 # ── Astronaut selection ────────────────────────────────────────────────────────
-st.markdown('<div class="hud-section">Select Astronaut</div>', unsafe_allow_html=True)
-
 if "selected_patient_name" not in st.session_state:
     st.session_state["selected_patient_name"] = "StandardMale"
 
-# Patient grid — 4 per row
-cols_per_row = 4
-patient_name_list = PATIENT_NAMES
-rows = [patient_name_list[i:i+cols_per_row] for i in range(0, len(patient_name_list), cols_per_row)]
+# ── Dialog: full profile + nutrition config (opens on SELECT / RECONFIGURE) ───
+@st.dialog("ASTRONAUT PROFILE & MISSION CONFIGURATION", width="large")
+def _patient_dialog(mission_day_val: int) -> None:
+    pname = st.session_state["selected_patient_name"]
+    p     = ALL_PATIENTS[pname]
+    mg    = microgravity_factors(mission_day_val)
+    adj   = mg.adjust_patient(p)
+    tc    = _TIER_COLOR.get(p.fitness_tier, "#00d4ff")
+    vo2_color = "var(--hud-amber)" if mg.vo2max_factor < 0.90 else "var(--hud-green)"
 
-for row in rows:
-    grid_cols = st.columns(cols_per_row)
-    for col, pname in zip(grid_cols, row):
-        p = ALL_PATIENTS[pname]
-        tier_color = _TIER_COLOR.get(p.fitness_tier, "#00d4ff")
-        is_selected = (pname == st.session_state["selected_patient_name"])
-        border_color = tier_color if is_selected else "#0c2040"
-        bg_color     = "rgba(0,212,255,0.06)" if is_selected else "var(--hud-card)"
-        with col:
+    # ── Profile card (read-only) ──────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="background:var(--hud-card);border:1px solid {tc}40;
+                padding:1rem 1.2rem;margin-bottom:1rem;
+                clip-path:polygon(0 0,calc(100% - 12px) 0,100% 12px,100% 100%,0 100%)">
+      <div style="font-family:var(--mono);font-size:0.58rem;color:{tc};
+                  text-transform:uppercase;letter-spacing:0.2em;margin-bottom:0.4rem">
+        {p.fitness_tier} ASTRONAUT
+      </div>
+      <div style="font-family:var(--mono);font-size:1.15rem;color:var(--hud-text);
+                  letter-spacing:0.06em;margin-bottom:0.9rem">{p.display_name}</div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.6rem 1rem;
+                  font-family:var(--mono);font-size:0.6rem">
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Sex / Age</div>
+             <div style="color:var(--hud-text)">{p.sex} / {p.age_yr:.0f} yr</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Weight</div>
+             <div style="color:var(--hud-text)">{p.weight_kg:.1f} kg</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Height</div>
+             <div style="color:var(--hud-text)">{p.height_cm:.0f} cm</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">BMI</div>
+             <div style="color:var(--hud-text)">{p.bmi:.1f}</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Lean Mass</div>
+             <div style="color:var(--hud-text)">{p.lean_mass_kg:.1f} kg</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Body Fat</div>
+             <div style="color:var(--hud-text)">{p.body_fat_fraction*100:.0f}%</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Glycogen (ground)</div>
+             <div style="color:var(--hud-text)">{p.glycogen_capacity_g:.0f} g</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Glycogen (day {mission_day_val})</div>
+             <div style="color:{vo2_color}">{adj["glycogen_capacity_g"]:.0f} g</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">Resting HR</div>
+             <div style="color:var(--hud-cyan)">{p.hr_baseline:.0f} bpm
+               <span style="color:var(--hud-muted)"> +{mg.hr_offset:.1f} space</span></div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">BP</div>
+             <div style="color:var(--hud-text)">{p.systolic_bp:.0f}/{p.diastolic_bp:.0f} mmHg</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">VO2max (ground)</div>
+             <div style="color:var(--hud-text)">{p.vo2max_ml_kg_min:.1f} mL/kg/min</div></div>
+        <div><div style="color:var(--hud-muted);text-transform:uppercase">VO2max (day {mission_day_val})</div>
+             <div style="color:{vo2_color}">{adj["vo2max_ml_kg_min"]:.1f} mL/kg/min</div></div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Nutrition & recovery sliders ──────────────────────────────────────────
+    st.markdown('<div style="font-family:var(--mono);font-size:0.62rem;color:var(--hud-cyan);'
+                'text-transform:uppercase;letter-spacing:0.18em;margin-bottom:0.5rem">'
+                '// Mission Nutrition &amp; Recovery</div>', unsafe_allow_html=True)
+
+    nc1, nc2 = st.columns(2)
+    with nc1:
+        carb = st.slider("Carbohydrates / meal (g)", 30, 300,
+                         st.session_state.get("cfg_carb_g", 130), 5,
+                         help="BioGears Carbohydrate field. NASA ISS: ~370g/day total.")
+        prot = st.slider("Protein / meal (g)", 5, 80,
+                         st.session_state.get("cfg_protein_g", 20), 5,
+                         help="BioGears Protein field. NASA EVA standard: 1.6 g/kg/day.")
+        meals = st.select_slider("Meals per day", [1, 2, 3, 4],
+                                 st.session_state.get("cfg_meals", 3))
+    with nc2:
+        water = st.slider("Daily water (L)", 1.0, 4.0,
+                          st.session_state.get("cfg_water_L", 2.0), 0.1,
+                          help="BioGears Water field. NASA minimum: 2.0 L/day in space.")
+        sodium = st.slider("Sodium / day (mg)", 500, 3000,
+                           st.session_state.get("cfg_sodium_mg", 1500), 100,
+                           help="BioGears Sodium. NASA limit 2300 mg/day. "
+                                "High Na raises water requirement in microgravity.")
+        sleep = st.slider("Sleep (hrs/night)", 4.0, 9.0,
+                          st.session_state.get("cfg_sleep_h", 8.0), 0.5,
+                          help="BioGears SleepAmount. ISS avg 6.5h; NASA target 8h.")
+
+    # Live nutrition summary inside dialog
+    d_carb  = carb * meals
+    d_prot  = prot * meals
+    d_kcal  = d_carb * 4 + d_prot * 4
+    p_tgt   = 1.6 * p.weight_kg
+    p_pct   = min(100, d_prot / p_tgt * 100)
+    p_col   = "#00ff88" if p_pct >= 90 else "#ffaa00" if p_pct >= 60 else "#ff1a3c"
+
+    st.markdown(f"""
+    <div style="margin:0.6rem 0;padding:0.6rem 0.9rem;background:var(--hud-surface);
+                border:1px solid var(--hud-dim);font-family:var(--mono);font-size:0.58rem;
+                display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.5rem;
+                text-transform:uppercase;letter-spacing:0.08em;color:var(--hud-muted)">
+      <div><div>Daily carbs</div><div style="color:var(--hud-cyan)">{d_carb:.0f} g</div></div>
+      <div><div>Protein / target</div>
+           <div style="color:{p_col}">{d_prot:.0f} / {p_tgt:.0f} g ({p_pct:.0f}%)</div></div>
+      <div><div>Est. kcal</div><div style="color:var(--hud-text)">{d_kcal:.0f}</div></div>
+      <div><div>Sleep debt / wk</div>
+           <div style="color:{'var(--hud-red)' if sleep < 7 else 'var(--hud-green)'}">
+             {max(0, (8-sleep)*7):.1f} h</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("CONFIRM  CONFIGURATION", type="primary", use_container_width=True):
+        st.session_state.update({
+            "cfg_carb_g":    carb,
+            "cfg_protein_g": prot,
+            "cfg_meals":     meals,
+            "cfg_water_L":   water,
+            "cfg_sodium_mg": sodium,
+            "cfg_sleep_h":   sleep,
+            "show_patient_dialog": False,
+        })
+        st.rerun()
+
+
+# Open dialog whenever the flag is set (SELECT or RECONFIGURE button)
+if st.session_state.get("show_patient_dialog", False):
+    _patient_dialog(mission_day)
+
+
+# ── Patient grid — compact cards (4 per row) ───────────────────────────────────
+st.markdown('<div class="hud-section">Select Astronaut</div>', unsafe_allow_html=True)
+
+_rows = [PATIENT_NAMES[i:i+4] for i in range(0, len(PATIENT_NAMES), 4)]
+for _row in _rows:
+    _gcols = st.columns(4)
+    for _col, pname in zip(_gcols, _row):
+        p  = ALL_PATIENTS[pname]
+        tc = _TIER_COLOR.get(p.fitness_tier, "#00d4ff")
+        is_sel = (pname == st.session_state["selected_patient_name"])
+        with _col:
             st.markdown(f"""
-            <div style="background:{bg_color};border:1px solid {border_color};
-                        padding:0.65rem 0.75rem;cursor:pointer;margin-bottom:0.3rem;
+            <div style="background:{'rgba(0,212,255,0.07)' if is_sel else 'var(--hud-card)'};
+                        border:1px solid {tc if is_sel else '#0c2040'};
+                        padding:0.6rem 0.7rem;margin-bottom:0.25rem;
                         clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,0 100%)">
-              <div style="font-family:var(--mono);font-size:0.58rem;color:{tier_color};
-                          text-transform:uppercase;letter-spacing:0.12em">
-                {p.fitness_tier} {'&#9679;' if is_selected else '&#9675;'}
+              <div style="font-family:var(--mono);font-size:0.55rem;color:{tc};
+                          text-transform:uppercase;letter-spacing:0.1em">
+                {p.fitness_tier} {'&#9679;' if is_sel else '&#9675;'}
               </div>
-              <div style="font-family:var(--mono);font-size:0.72rem;color:var(--hud-text);
-                          margin:0.2rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              <div style="font-family:var(--mono);font-size:0.68rem;color:var(--hud-text);
+                          margin:0.15rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
                 {p.display_name}
               </div>
-              <div style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-muted)">
-                {p.sex[0]} · {p.age_yr:.0f}yr · {p.bmi:.1f} BMI
-              </div>
-              <div style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-muted)">
-                HR {p.hr_baseline:.0f} · VO2 {p.vo2max_ml_kg_min:.0f}
+              <div style="font-family:var(--mono);font-size:0.52rem;color:var(--hud-muted)">
+                {p.sex[0]} {p.age_yr:.0f}yr &nbsp;|&nbsp; HR {p.hr_baseline:.0f} &nbsp;|&nbsp; VO2 {p.vo2max_ml_kg_min:.0f}
               </div>
             </div>
             """, unsafe_allow_html=True)
-            if st.button(f"SELECT", key=f"sel_{pname}", use_container_width=True):
+            if st.button("SELECT", key=f"sel_{pname}", use_container_width=True):
                 st.session_state["selected_patient_name"] = pname
+                st.session_state["show_patient_dialog"]   = True
                 st.rerun()
 
-# ── Selected astronaut profile card + nutrition editors ───────────────────────
+
+# ── Compact selected-astronaut bar ────────────────────────────────────────────
 sel_name = st.session_state["selected_patient_name"]
 patient  = ALL_PATIENTS[sel_name]
 mg_now   = microgravity_factors(mission_day)
 adj      = mg_now.adjust_patient(patient)
+tc_sel   = _TIER_COLOR.get(patient.fitness_tier, "#00d4ff")
 
-tier_color = _TIER_COLOR.get(patient.fitness_tier, "#00d4ff")
+# Read nutrition config from session state (set by dialog CONFIRM)
+carb_g_per_meal    = st.session_state.get("cfg_carb_g",    130)
+protein_g_per_meal = st.session_state.get("cfg_protein_g", 20)
+meals_per_day      = st.session_state.get("cfg_meals",     3)
+daily_water_L      = st.session_state.get("cfg_water_L",   2.0)
+sodium_mg_per_day  = st.session_state.get("cfg_sodium_mg", 1500)
+sleep_hours        = st.session_state.get("cfg_sleep_h",   8.0)
 
-st.markdown('<div class="hud-section">Astronaut Profile &amp; Mission Nutrition</div>',
-            unsafe_allow_html=True)
-
-card_col, config_col = st.columns([1, 1.6])
-
-with card_col:
+bar_col, btn_col = st.columns([5, 1])
+with bar_col:
     st.markdown(f"""
-    <div class="hud-panel" style="border-color:{tier_color}40">
-      <span class="c tl" style="border-color:{tier_color}"></span>
-      <span class="c tr" style="border-color:{tier_color}"></span>
-      <span class="c bl" style="border-color:{tier_color}"></span>
-      <span class="c br" style="border-color:{tier_color}"></span>
-
-      <div style="font-family:var(--mono);font-size:0.58rem;color:{tier_color};
-                  text-transform:uppercase;letter-spacing:0.18em;margin-bottom:0.5rem">
-        {patient.fitness_tier} ASTRONAUT
+    <div style="background:var(--hud-surface);border:1px solid {tc_sel}30;
+                padding:0.65rem 1rem;display:flex;align-items:center;gap:1.5rem;
+                font-family:var(--mono);font-size:0.6rem;
+                clip-path:polygon(0 0,calc(100% - 10px) 0,100% 10px,100% 100%,0 100%)">
+      <div>
+        <div style="color:var(--hud-muted);font-size:0.52rem;text-transform:uppercase;letter-spacing:0.14em">
+          Active Astronaut
+        </div>
+        <div style="color:{tc_sel};font-size:0.85rem;letter-spacing:0.05em">{patient.display_name}</div>
       </div>
-      <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-text);
-                  letter-spacing:0.06em;margin-bottom:0.8rem">
-        {patient.display_name}
+      <div style="color:var(--hud-muted)">|</div>
+      <div>
+        <div style="color:var(--hud-muted);font-size:0.52rem;text-transform:uppercase">HR (space)</div>
+        <div style="color:var(--hud-cyan)">{adj["vo2max_ml_kg_min"]:.1f} mL/kg/min &nbsp; {patient.hr_baseline + mg_now.hr_offset:.0f} bpm</div>
       </div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;
-                  font-family:var(--mono);font-size:0.6rem">
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Sex / Age</div>
-          <div style="color:var(--hud-text)">{patient.sex} / {patient.age_yr:.0f} yr</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Weight / Height</div>
-          <div style="color:var(--hud-text)">{patient.weight_kg:.1f} kg / {patient.height_cm:.0f} cm</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">BMI</div>
-          <div style="color:var(--hud-text)">{patient.bmi:.1f}</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Body Fat</div>
-          <div style="color:var(--hud-text)">{patient.body_fat_fraction*100:.0f}%</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Lean Mass</div>
-          <div style="color:var(--hud-text)">{patient.lean_mass_kg:.1f} kg</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Glycogen Cap</div>
-          <div style="color:var(--hud-text)">{patient.glycogen_capacity_g:.0f} g</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Resting HR</div>
-          <div style="color:var(--hud-cyan)">{patient.hr_baseline:.0f} bpm
-            <span style="color:var(--hud-muted)">+{mg_now.hr_offset:.1f} in space</span>
-          </div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">BP Baseline</div>
-          <div style="color:var(--hud-text)">{patient.systolic_bp:.0f}/{patient.diastolic_bp:.0f} mmHg</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">VO2max (ground)</div>
-          <div style="color:var(--hud-text)">{patient.vo2max_ml_kg_min:.1f} mL/kg/min</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">VO2max (day {mission_day})</div>
-          <div style="color:{'var(--hud-amber)' if mg_now.vo2max_factor < 0.90 else 'var(--hud-green)'}">{adj['vo2max_ml_kg_min']:.1f} mL/kg/min</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Glycogen (adj)</div>
-          <div style="color:var(--hud-text)">{adj['glycogen_capacity_g']:.0f} g</div>
-        </div>
-        <div>
-          <div style="color:var(--hud-muted);text-transform:uppercase;letter-spacing:0.1em">Est. daily kcal</div>
-          <div style="color:var(--hud-text)">{patient.daily_kcal_estimate:.0f} kcal</div>
-        </div>
+      <div style="color:var(--hud-muted)">|</div>
+      <div>
+        <div style="color:var(--hud-muted);font-size:0.52rem;text-transform:uppercase">Nutrition / sleep</div>
+        <div style="color:var(--hud-text)">C {carb_g_per_meal}g &nbsp; P {protein_g_per_meal}g &nbsp; x{meals_per_day} meals &nbsp; {daily_water_L}L H2O &nbsp; {sleep_hours}h sleep</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
-
-with config_col:
-    st.markdown('<div style="font-family:var(--mono);font-size:0.6rem;color:var(--hud-cyan);'
-                'text-transform:uppercase;letter-spacing:0.18em;margin-bottom:0.6rem">'
-                '// Nutrition &amp; Recovery Configuration</div>', unsafe_allow_html=True)
-
-    nc1, nc2 = st.columns(2)
-    with nc1:
-        carb_g_per_meal = st.slider(
-            "Carbohydrates / meal (g)", 30, 300, 130, 5,
-            help="BioGears Carbohydrate field. NASA ISS target: ~370g/day total.")
-        protein_g_per_meal = st.slider(
-            "Protein / meal (g)", 5, 80, 20, 5,
-            help="BioGears Protein field. NASA EVA target: 1.6g/kg/day.")
-        meals_per_day = st.select_slider(
-            "Meals per day", options=[1, 2, 3, 4], value=3)
-    with nc2:
-        daily_water_L = st.slider(
-            "Daily water (L)", 1.0, 4.0, 2.0, 0.1,
-            help="BioGears Water field. NASA minimum: 2.0 L/day in space.")
-        sodium_mg_per_day = st.slider(
-            "Sodium / day (mg)", 500, 3000, 1500, 100,
-            help="BioGears Sodium field. NASA limit: 2300 mg/day. "
-                 "High sodium raises effective water need in microgravity.")
-        sleep_hours = st.slider(
-            "Sleep (hrs/night)", 4.0, 9.0, 8.0, 0.5,
-            help="BioGears SleepAmount. ISS astronauts avg 6.5h; NASA target 8h.")
-
-    # Live nutrition summary
-    daily_carb   = carb_g_per_meal * meals_per_day
-    daily_prot   = protein_g_per_meal * meals_per_day
-    daily_kcal   = daily_carb * 4 + daily_prot * 4
-    prot_target  = 1.6 * patient.weight_kg
-    prot_pct     = min(100, daily_prot / prot_target * 100)
-    prot_color   = "#00ff88" if prot_pct >= 90 else "#ffaa00" if prot_pct >= 60 else "#ff1a3c"
-
-    st.markdown(f"""
-    <div style="margin-top:0.8rem;padding:0.65rem 0.8rem;background:var(--hud-surface);
-                border:1px solid var(--hud-dim);font-family:var(--mono);font-size:0.58rem;
-                color:var(--hud-muted);letter-spacing:0.1em;text-transform:uppercase;
-                display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem">
-      <div>
-        <div>Daily carbs</div>
-        <div style="color:var(--hud-cyan)">{daily_carb:.0f} g</div>
-      </div>
-      <div>
-        <div>Protein vs target</div>
-        <div style="color:{prot_color}">{daily_prot:.0f} / {prot_target:.0f} g ({prot_pct:.0f}%)</div>
-      </div>
-      <div>
-        <div>Est. intake</div>
-        <div style="color:var(--hud-text)">{daily_kcal:.0f} kcal/day</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+with btn_col:
+    if st.button("RECONFIGURE", use_container_width=True):
+        st.session_state["show_patient_dialog"] = True
+        st.rerun()
 
 st.divider()
 
