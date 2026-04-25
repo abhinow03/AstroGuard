@@ -19,11 +19,12 @@ import numpy as np
 import pandas as pd
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BIOGEARS_BIN = Path("Z:/BIOGEARS/bin")
-BG_SCENARIO  = BIOGEARS_BIN / "bg-scenario.exe"   # bg-scenario.exe works; bg-cli.exe crashes
-RUNS_DIR     = BIOGEARS_BIN / "runs"
-SCENARIO_NAME = "EVA_Mission_Scenario"
-FALLBACK_CSV  = Path(__file__).parent.parent / "CardiovascularValidationResults.csv"
+BIOGEARS_BIN    = Path("Z:/BIOGEARS/bin")
+BG_SCENARIO     = BIOGEARS_BIN / "bg-scenario.exe"
+RUNS_DIR        = BIOGEARS_BIN / "runs"
+SCENARIO_NAME   = "EVA_Mission_Scenario"
+FALLBACK_CSV    = Path(__file__).parent.parent / "CardiovascularValidationResults.csv"
+PRECOMPUTED_DIR = Path(__file__).parent.parent / "precomputed"
 
 # BioGears scenario is intentionally SHORT (10 min EVA, 5 min recovery).
 # The physiological SHAPE is captured here and then resampled to fill the
@@ -321,32 +322,107 @@ def _load_fallback(eva_intensity: float, eva_duration_min: float, recovery_min: 
     })
 
 
+# ── Precomputed CSV library ────────────────────────────────────────────────────
+
+def _save_precomputed(df: pd.DataFrame, eva_intensity: float) -> None:
+    """Save a successful live BioGears run to precomputed/ for future CSV-mode use."""
+    PRECOMPUTED_DIR.mkdir(exist_ok=True)
+    name = f"intensity_{int(round(eva_intensity * 100)):03d}.csv"
+    df.to_csv(PRECOMPUTED_DIR / name, index=False)
+
+
+def _load_precomputed(eva_intensity: float) -> Tuple["pd.DataFrame | None", str]:
+    """
+    Load the nearest precomputed CSV, blending two adjacent intensities if needed.
+
+    Files are named intensity_050.csv (= 0.50), intensity_070.csv (= 0.70), etc.
+    Blending: linear interpolation column-by-column between the two bounding CSVs.
+    """
+    if not PRECOMPUTED_DIR.exists():
+        return None, "precomputed/ directory not found"
+
+    csvs = sorted(PRECOMPUTED_DIR.glob("intensity_*.csv"))
+    if not csvs:
+        return None, "No precomputed CSVs in precomputed/ — run Live BioGears at least once"
+
+    available: dict[float, Path] = {}
+    for p in csvs:
+        try:
+            val = int(p.stem.split("_")[1]) / 100.0
+            available[val] = p
+        except (IndexError, ValueError):
+            continue
+
+    if not available:
+        return None, "Could not parse precomputed CSV filenames"
+
+    keys = sorted(available)
+
+    # Exact match or clamp to edges
+    if eva_intensity <= keys[0]:
+        df = _parse_csv(available[keys[0]])
+        return df, f"Precomputed CSV  intensity={keys[0]:.2f}"
+    if eva_intensity >= keys[-1]:
+        df = _parse_csv(available[keys[-1]])
+        return df, f"Precomputed CSV  intensity={keys[-1]:.2f}"
+
+    # Blend between surrounding pair
+    for j in range(len(keys) - 1):
+        lo, hi = keys[j], keys[j + 1]
+        if lo <= eva_intensity <= hi:
+            alpha  = (eva_intensity - lo) / (hi - lo)
+            df_lo  = _parse_csv(available[lo])
+            df_hi  = _parse_csv(available[hi])
+            if df_lo is None or df_hi is None:
+                break
+            n = min(len(df_lo), len(df_hi))
+            df_blend = df_lo.iloc[:n].copy().reset_index(drop=True)
+            for col in df_lo.columns:
+                if col != "Time_s" and col in df_hi.columns:
+                    df_blend[col] = (
+                        (1 - alpha) * df_lo[col].values[:n]
+                        + alpha     * df_hi[col].values[:n]
+                    )
+            return df_blend, f"Precomputed blend {lo:.2f}→{hi:.2f} @ {eva_intensity:.2f}"
+
+    return None, "Precomputed blend failed"
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def get_biogears_segment(
     eva_intensity: float,
-    eva_duration_min: float,   # kept for API compatibility; BioGears uses BG_EVA_DURATION_MIN
-    recovery_min: float,       # kept for API compatibility; BioGears uses BG_RECOVERY_MIN
+    eva_duration_min: float,
+    recovery_min: float,
+    mode: str = "live",
     progress_callback=None,
 ) -> Tuple[pd.DataFrame, bool, str]:
     """
     Top-level function used by the Streamlit app.
 
-    Runs a short BioGears EVA capture (BG_EVA_DURATION_MIN minutes) to get
-    the physiological shape at `eva_intensity`.  health_vars.py then
-    resamples that shape to fill the actual mission EVA duration.
+    mode="csv"  — instant: loads from precomputed/ library, blending if needed.
+                  Falls back to synth if no precomputed files exist.
+    mode="live" — runs bg-scenario.exe, saves result to precomputed/ on success,
+                  falls back to synth if BioGears is unavailable.
 
-    Returns:
-        (df, used_real_biogears, status_message)
+    Returns: (df, used_real_biogears, status_message)
     """
+    if mode == "csv":
+        df, msg = _load_precomputed(eva_intensity)
+        if df is not None and len(df) > 20:
+            return df, True, f"CSV MODE · {msg}"
+        # No precomputed files yet — fall through to synth
+        fallback_df = _load_fallback(eva_intensity, BG_EVA_DURATION_MIN, BG_RECOVERY_MIN)
+        return fallback_df, False, f"CSV MODE · {msg} — using synth fallback"
+
+    # Live mode
     df, msg = run_biogears(eva_intensity, progress_callback=progress_callback)
     if df is not None and len(df) > 20:
+        _save_precomputed(df, eva_intensity)   # cache for future CSV-mode use
         return df, True, msg
 
-    # Fallback: synthesise a realistic segment
     fallback_df = _load_fallback(eva_intensity, BG_EVA_DURATION_MIN, BG_RECOVERY_MIN)
-    fallback_msg = ("BioGears unavailable — using synthesised physiological signals. "
-                    f"(Reason: {msg})")
+    fallback_msg = f"BioGears unavailable — using synthesised signals. ({msg})"
     return fallback_df, False, fallback_msg
 
 

@@ -1,0 +1,92 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Scenario xmlns="uri:/mil/tatrc/physiology/datamodel" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="" contentVersion="AstroGuard_1.0" timestamp="2026-04-22T16:28:06" missionID="MISSION-20260422_162806">
+  <Name>EVA_Mission_Scenario_20260422_162806</Name>
+  <Description>AstroGuard Mission Log · 48h mission · EVA intensity 0.50 · Day 10 in microgravity</Description>
+  <InitialParameters>
+    <PatientFile>StandardMale.xml</PatientFile>
+  </InitialParameters>
+  <DataRequests SamplesPerSecond="1">
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="HeartRate" Unit="1/min" Precision="2" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="OxygenSaturation" Unit="unitless" Precision="4" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="CoreTemperature" Unit="degC" Precision="2" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="RespirationRate" Unit="1/min" Precision="2" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="FatigueLevel" Unit="unitless" Precision="4" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="TotalWorkRateLevel" Unit="unitless" Precision="4" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="AchievedExerciseLevel" Unit="unitless" Precision="4" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="TotalMetabolicRate" Unit="W" Precision="2" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="CardiacOutput" Unit="L/min" Precision="2" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="SystolicArterialPressure" Unit="mmHg" Precision="1" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="DiastolicArterialPressure" Unit="mmHg" Precision="1" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="SweatRate" Unit="mg/min" Precision="2" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="MuscleGlycogen" Unit="g" Precision="2" />
+  </DataRequests>
+  <Actions>
+    <Action xsi:type="AdvanceTimeData">
+      <Time value="30" unit="s" />
+    </Action>
+    <Action xsi:type="ExerciseData">
+      <GenericExercise>
+        <Intensity value="0.500" />
+      </GenericExercise>
+    </Action>
+    <Action xsi:type="AdvanceTimeData">
+      <Time value="5400" unit="s" />
+    </Action>
+    <Action xsi:type="ExerciseData">
+      <GenericExercise>
+        <Intensity value="0.000" />
+      </GenericExercise>
+    </Action>
+    <Action xsi:type="AdvanceTimeData">
+      <Time value="1800" unit="s" />
+    </Action>
+  </Actions>
+  <MissionParameters>
+    <MissionDuration value="48" unit="h" />
+    <NumberOfEVAs value="1" />
+    <RiskThreshold value="0.80" />
+    <BioGearsMode>CSV</BioGearsMode>
+    <BioGearsStatus>CSV MODE · Precomputed CSV  intensity=0.50</BioGearsStatus>
+    <MonteCarloSimulations value="10" />
+  </MissionParameters>
+  <PhysiologyParameters>
+    <MicrogravityDeconditioning>
+      <MissionDay value="10" />
+      <DeconditioningFactor value="1.080" />
+      <HRBaselineOffset value="15.0" unit="1/min" />
+      <SpO2BaselineOffset value="-0.0100" unit="unitless" />
+    </MicrogravityDeconditioning>
+    <NutritionHydration>
+      <WaterIntake value="0.25" unit="L/h" />
+      <MealsPerDay value="3" />
+      <MinHydration value="0.5820" unit="unitless" />
+      <FinalHydration value="1.0000" unit="unitless" />
+      <MinFoodLevel value="0.2984" unit="unitless" />
+      <FinalFoodLevel value="0.7304" unit="unitless" />
+    </NutritionHydration>
+  </PhysiologyParameters>
+  <MissionEvents>
+    <Event xsi:type="EVAEventData" startMin="731" endMin="940" durationMin="209" intensity="0.500" />
+    <Event xsi:type="SleepEventData" startMin="1363" endMin="1866" durationMin="503" />
+    <Event xsi:type="SleepEventData" startMin="2711" endMin="2880" durationMin="169" />
+    <Event xsi:type="DehydrationEventData" startMin="1584" endMin="1771" durationMin="187" intensity="0.763" />
+  </MissionEvents>
+  <RiskAnalytics>
+    <MissionStatus color="#fd7e14">MONITOR</MissionStatus>
+    <PeakFatigue value="1.0000" atMinute="867" atHour="14.45" />
+    <TimeAtRisk value="8.65" unit="%" />
+    <FatigueTrend slope="0.000000">Stable</FatigueTrend>
+    <MonteCarlo nSimulations="10" probOfBreach="1.0000" meanPeakFatigue="1.0000" worstCaseFatigue="1.0000" />
+    <RiskPeriods count="1">
+      <Period startMin="841" endMin="1090" durationMin="249" startHour="14.02" />
+    </RiskPeriods>
+  </RiskAnalytics>
+  <PhysiologicalSummary>
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="HeartRate" Unit="1/min" finalValue="56.9967" baselineValue="87.0308" peakValue="180.9999" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="OxygenSaturation" Unit="unitless" finalValue="0.9693" baselineValue="0.9685" minValue="0.9550" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="CoreTemperature" Unit="degC" finalValue="36.3886" baselineValue="36.9373" peakValue="38.1760" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="FatigueLevel" Unit="unitless" finalValue="0.0000" peakValue="1.0000" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="HydrationLevel" Unit="unitless" finalValue="1.0000" minValue="0.5820" />
+    <DataRequest xsi:type="PhysiologyDataRequestData" Name="FoodLevel" Unit="unitless" finalValue="0.7304" minValue="0.2984" />
+  </PhysiologicalSummary>
+</Scenario>

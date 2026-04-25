@@ -1,7 +1,8 @@
 """
-Astronaut Health Digital Twin — Streamlit Dashboard
-====================================================
+AstroGuard — Astronaut Health Digital Twin
+==========================================
 Run with:   streamlit run app.py
+UI: HUD / Sci-Fi retro-futurism — UI UX Pro Max Style 11 + Style 7
 """
 from __future__ import annotations
 
@@ -12,9 +13,10 @@ import streamlit as st
 
 from analytics.risk import mc_summary, mission_status, run_monte_carlo, single_run_analytics
 from simulation.biogears import get_biogears_segment
+from simulation.mission_log import save_mission_log
 from simulation.events import sample_events
 from simulation.fatigue import compute_fatigue, normalise_biogears_fatigue
-from simulation.health_vars import build_mission_timeline
+from simulation.health_vars import build_mission_timeline, build_hydration_timeline, build_food_timeline
 from visualization.charts import (
     make_risk_gauge,
     plot_biogears_raw,
@@ -26,269 +28,595 @@ from visualization.charts import (
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Astronaut Health Digital Twin",
-    page_icon="🚀",
+    page_title="AstroGuard · Mission Control",
+    page_icon="🛰",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Global CSS ─────────────────────────────────────────────────────────────────
+# ── HUD Design System CSS ──────────────────────────────────────────────────────
 st.markdown("""
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+
 <style>
+/* ══════════════════════════════════════════════════════════
+   HUD DESIGN TOKENS  (UI UX Pro Max · Style 11 Retro-Futurism
+   + Style 7 Dark OLED · space-medical palette)
+   ══════════════════════════════════════════════════════════ */
+:root {
+  --hud-bg:       #030608;
+  --hud-surface:  #060c18;
+  --hud-card:     #080e1e;
+  --hud-border:   #0c2040;
+  --hud-grid:     rgba(0,212,255,0.04);
+  --hud-scan:     rgba(0,212,255,0.018);
+
+  --hud-cyan:     #00d4ff;
+  --hud-green:    #00ff88;
+  --hud-orange:   #ff6b00;
+  --hud-red:      #ff1a3c;
+  --hud-amber:    #ffaa00;
+  --hud-purple:   #b44fff;
+  --hud-blue:     #1a7fff;
+
+  --hud-text:     #c0ddef;
+  --hud-muted:    #1e4060;
+  --hud-dim:      #0f2540;
+
+  --mono: 'Share Tech Mono', 'Courier New', monospace;
+  --ui:   'Exo 2', 'Segoe UI', sans-serif;
+
+  --corner-size: 10px;
+  --corner-w:    2px;
+  --glow-cyan:   0 0 8px rgba(0,212,255,0.5);
+  --glow-green:  0 0 8px rgba(0,255,136,0.5);
+  --glow-red:    0 0 8px rgba(255,26,60,0.5);
+  --glow-orange: 0 0 8px rgba(255,107,0,0.5);
+}
+
+/* ── A: Scanline overlay (C) ── zero-performance CSS only */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    var(--hud-scan) 0px,
+    var(--hud-scan) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+  pointer-events: none;
+  z-index: 9990;
+}
+
+/* ── Moving scan line (C) ── */
+body::after {
+  content: '';
+  position: fixed;
+  left: 0; right: 0;
+  height: 120px;
+  top: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(0,212,255,0.04) 40%,
+    rgba(0,212,255,0.08) 50%,
+    rgba(0,212,255,0.04) 60%,
+    transparent 100%
+  );
+  animation: hud-scan 12s linear infinite;
+  pointer-events: none;
+  z-index: 9989;
+}
+@keyframes hud-scan {
+  0%   { transform: translateY(-120px); }
+  100% { transform: translateY(110vh); }
+}
+
+/* ── CRT phosphor title glow (C) ── */
+.hud-title-glow {
+  text-shadow:
+    0 0 6px rgba(0,212,255,0.9),
+    0 0 20px rgba(0,212,255,0.4),
+    0 0 40px rgba(0,212,255,0.15);
+}
+
 /* ── Base ── */
 html, body, [data-testid="stAppViewContainer"] {
-    background: #070b14;
-    color: #cbd5e1;
+  background: var(--hud-bg) !important;
+  color: var(--hud-text);
+  font-family: var(--ui);
 }
+[data-testid="stMain"] { background: var(--hud-bg) !important; }
+/* ── Style Streamlit header to match HUD ── */
+header[data-testid="stHeader"] {
+  background: rgba(4,8,20,0.95) !important;
+  border-bottom: 1px solid rgba(0,212,255,0.2) !important;
+  backdrop-filter: blur(8px);
+}
+[data-testid="stToolbar"] {
+  background: transparent !important;
+}
+[data-testid="stToolbar"] button,
+[data-testid="stToolbar"] a {
+  color: var(--hud-cyan) !important;
+  border-color: rgba(0,212,255,0.3) !important;
+}
+#MainMenu { visibility: hidden !important; }
+[data-testid="block-container"] { padding-top: 0.25rem !important; }
+
+/* ── Sidebar — mission control panel ── */
 [data-testid="stSidebar"] {
-    background: #0d1117 !important;
-    border-right: 1px solid #1e2d40;
+  background: var(--hud-surface) !important;
+  border-right: 1px solid var(--hud-border) !important;
 }
-[data-testid="stSidebar"] .stSlider > div > div > div { background: #1e2d40; }
-[data-testid="stSidebar"] .stSlider > div > div > div > div { background: #f97316; }
+[data-testid="stSidebar"]::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--hud-cyan), transparent);
+}
+/* Slider track */
+[data-testid="stSidebar"] .stSlider > div > div > div {
+  background: var(--hud-dim) !important;
+}
+[data-testid="stSidebar"] .stSlider > div > div > div > div {
+  background: var(--hud-cyan) !important;
+  box-shadow: var(--glow-cyan);
+}
+
+/* ── I: Tab bar — mission module selector ── */
+[data-testid="stTabs"] [role="tablist"] {
+  background: var(--hud-surface);
+  border-bottom: 1px solid var(--hud-border);
+  padding: 0.35rem 0.4rem;
+  gap: 0.3rem;
+}
+[data-testid="stTabs"] button[role="tab"] {
+  background: var(--hud-card);
+  border: 1px solid var(--hud-dim) !important;
+  border-radius: 2px !important;
+  color: var(--hud-muted) !important;
+  font-family: var(--mono) !important;
+  font-size: 0.68rem !important;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 0.45rem 1.1rem !important;
+  transition: all 0.18s ease;
+  clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%);
+}
+[data-testid="stTabs"] button[role="tab"]:hover {
+  background: rgba(0,212,255,0.06) !important;
+  border-color: rgba(0,212,255,0.25) !important;
+  color: rgba(0,212,255,0.7) !important;
+}
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+  background: rgba(0,212,255,0.1) !important;
+  border-color: var(--hud-cyan) !important;
+  color: var(--hud-cyan) !important;
+  box-shadow: 0 0 14px rgba(0,212,255,0.25), inset 0 -2px 0 var(--hud-cyan);
+}
+/* Hide default Streamlit tab underline */
+[data-testid="stTabs"] [role="tablist"] ~ div { border-top: none !important; }
+
+/* ── A: Corner-bracket panels ── */
+.hud-panel {
+  position: relative;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-border);
+  padding: 1rem 1.1rem;
+  margin-bottom: 0.6rem;
+}
+.hud-panel .c { position: absolute; width: var(--corner-size); height: var(--corner-size); }
+.hud-panel .c.tl { top: -1px;  left: -1px;  border-top:    var(--corner-w) solid var(--hud-cyan); border-left:  var(--corner-w) solid var(--hud-cyan); }
+.hud-panel .c.tr { top: -1px;  right: -1px; border-top:    var(--corner-w) solid var(--hud-cyan); border-right: var(--corner-w) solid var(--hud-cyan); }
+.hud-panel .c.bl { bottom: -1px; left: -1px;  border-bottom: var(--corner-w) solid var(--hud-cyan); border-left:  var(--corner-w) solid var(--hud-cyan); }
+.hud-panel .c.br { bottom: -1px; right: -1px; border-bottom: var(--corner-w) solid var(--hud-cyan); border-right: var(--corner-w) solid var(--hud-cyan); }
+
+/* Corner variant colours */
+.hud-panel.green .c { border-color: var(--hud-green); }
+.hud-panel.orange .c { border-color: var(--hud-orange); }
+.hud-panel.red .c  { border-color: var(--hud-red); }
+.hud-panel.amber .c { border-color: var(--hud-amber); }
+
+/* ── B: Monospace data values ── */
+.hud-value {
+  font-family: var(--mono);
+  font-size: 1.7rem;
+  color: var(--hud-text);
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+}
+.hud-value.cyan   { color: var(--hud-cyan);   text-shadow: var(--glow-cyan); }
+.hud-value.green  { color: var(--hud-green);  text-shadow: var(--glow-green); }
+.hud-value.orange { color: var(--hud-orange); text-shadow: var(--glow-orange); }
+.hud-value.red    { color: var(--hud-red);    text-shadow: var(--glow-red); }
+.hud-value.amber  { color: var(--hud-amber); }
+
+.hud-label {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--hud-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  margin-bottom: 0.25rem;
+}
+.hud-sub {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--hud-muted);
+  margin-top: 0.3rem;
+  letter-spacing: 0.06em;
+}
+.hud-sub.up   { color: var(--hud-red); }
+.hud-sub.down { color: var(--hud-green); }
+
+/* ── D: Radar-ping pulsing status indicator ── */
+@keyframes radar-ping {
+  0%   { box-shadow: 0 0 0 0px rgba(0,255,136,0.7); }
+  60%  { box-shadow: 0 0 0 10px rgba(0,255,136,0); }
+  100% { box-shadow: 0 0 0 0px rgba(0,255,136,0); }
+}
+@keyframes radar-ping-red {
+  0%   { box-shadow: 0 0 0 0px rgba(255,26,60,0.8); }
+  60%  { box-shadow: 0 0 0 14px rgba(255,26,60,0); }
+  100% { box-shadow: 0 0 0 0px rgba(255,26,60,0); }
+}
+@keyframes radar-ping-amber {
+  0%   { box-shadow: 0 0 0 0px rgba(255,170,0,0.7); }
+  60%  { box-shadow: 0 0 0 12px rgba(255,170,0,0); }
+  100% { box-shadow: 0 0 0 0px rgba(255,170,0,0); }
+}
+.ping-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.ping-dot.green  { background: var(--hud-green);  animation: radar-ping       1.8s infinite; }
+.ping-dot.red    { background: var(--hud-red);    animation: radar-ping-red   1.2s infinite; }
+.ping-dot.amber  { background: var(--hud-amber);  animation: radar-ping-amber 1.5s infinite; }
+
+/* ── G: Alert banner ── */
+@keyframes alert-flash {
+  0%,100% { opacity: 1; }
+  50%      { opacity: 0.6; }
+}
+.alert-banner {
+  width: 100%;
+  padding: 0.6rem 1.2rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  text-align: center;
+  margin-bottom: 0.8rem;
+  clip-path: polygon(6px 0%, calc(100% - 6px) 0%, 100% 6px, 100% 100%, calc(100% - 6px) 100%, 6px 100%, 0% calc(100% - 6px), 0% 6px);
+}
+.alert-abort {
+  background: rgba(255,26,60,0.12);
+  border: 1px solid var(--hud-red);
+  color: var(--hud-red);
+  box-shadow: 0 0 20px rgba(255,26,60,0.2), inset 0 0 30px rgba(255,26,60,0.05);
+  animation: alert-flash 0.8s ease-in-out infinite;
+}
+.alert-monitor {
+  background: rgba(255,170,0,0.10);
+  border: 1px solid var(--hud-amber);
+  color: var(--hud-amber);
+  box-shadow: 0 0 16px rgba(255,170,0,0.15);
+  animation: alert-flash 1.4s ease-in-out infinite;
+}
 
 /* ── Mission banner ── */
 .mission-banner {
-    background: linear-gradient(135deg, #0d1117 0%, #111827 50%, #0a1628 100%);
-    border: 1px solid #1e2d40;
-    border-top: 3px solid #f97316;
-    border-radius: 8px;
-    padding: 1.1rem 1.5rem;
-    margin-bottom: 1.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+  background: linear-gradient(135deg, #060c18 0%, #080e1e 60%, #040a14 100%);
+  border: 1px solid var(--hud-border);
+  border-top: 2px solid var(--hud-cyan);
+  padding: 1rem 1.4rem;
+  margin-bottom: 0.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  position: relative;
+}
+.mission-banner::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg,
+    rgba(0,212,255,0.04) 0%,
+    transparent 30%,
+    transparent 70%,
+    rgba(0,212,255,0.02) 100%
+  );
+  pointer-events: none;
 }
 .mission-title {
-    font-size: 1.45rem;
-    font-weight: 800;
-    letter-spacing: 0.04em;
-    color: #f1f5f9;
-    margin: 0;
+  font-family: var(--mono);
+  font-size: 1.2rem;
+  color: var(--hud-cyan);
+  text-shadow: var(--glow-cyan);
+  letter-spacing: 0.08em;
+  margin: 0;
+  text-transform: uppercase;
 }
 .mission-subtitle {
-    font-size: 0.78rem;
-    color: #64748b;
-    margin: 0.15rem 0 0 0;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+  font-family: var(--ui);
+  font-size: 0.72rem;
+  color: var(--hud-muted);
+  margin: 0.25rem 0 0;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
+.mission-ref {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--hud-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-top: 0.5rem;
+}
+
+/* ── Live indicator ── */
 .live-badge {
-    background: rgba(34,197,94,0.15);
-    border: 1px solid rgba(34,197,94,0.4);
-    color: #22c55e;
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    padding: 0.25em 0.9em;
-    border-radius: 2em;
-    text-transform: uppercase;
-    animation: pulse 2s infinite;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 0.3em 0.9em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  clip-path: polygon(4px 0%, calc(100% - 4px) 0%, 100% 4px, 100% 100%, calc(100% - 4px) 100%, 4px 100%, 0% calc(100% - 4px), 0% 4px);
 }
-@keyframes pulse {
-    0%,100% { opacity: 1; }
-    50%      { opacity: 0.5; }
+.live-badge.nominal {
+  background: rgba(0,255,136,0.08);
+  border: 1px solid rgba(0,255,136,0.35);
+  color: var(--hud-green);
 }
-.ref-tag {
-    font-size: 0.68rem;
-    color: #475569;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin-top: 0.4rem;
-}
-
-/* ── Metric cards ── */
-.metric-grid { display: flex; gap: 0.8rem; margin-bottom: 1rem; }
-.metric-card {
-    flex: 1;
-    background: #111827;
-    border: 1px solid #1e2d40;
-    border-radius: 8px;
-    padding: 0.9rem 1.1rem;
-    position: relative;
-    overflow: hidden;
-}
-.metric-card::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 0; bottom: 0;
-    width: 3px;
-    border-radius: 8px 0 0 8px;
-}
-.metric-card.orange::before { background: #f97316; }
-.metric-card.blue::before   { background: #3b82f6; }
-.metric-card.purple::before { background: #a855f7; }
-.metric-card.green::before  { background: #22c55e; }
-.metric-card.red::before    { background: #ef4444; }
-.metric-card.yellow::before { background: #eab308; }
-.metric-label {
-    font-size: 0.7rem;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin-bottom: 0.3rem;
-}
-.metric-value {
-    font-size: 1.55rem;
-    font-weight: 800;
-    color: #f1f5f9;
-    line-height: 1.1;
-}
-.metric-delta {
-    font-size: 0.72rem;
-    margin-top: 0.3rem;
-    color: #64748b;
-}
-.metric-delta.up   { color: #ef4444; }
-.metric-delta.down { color: #22c55e; }
-
-/* ── Status badge ── */
-.status-badge {
-    display: inline-block;
-    padding: 0.3em 1.1em;
-    border-radius: 1.5em;
-    font-size: 0.9rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+.live-badge.fallback {
+  background: rgba(255,170,0,0.08);
+  border: 1px solid rgba(255,170,0,0.35);
+  color: var(--hud-amber);
 }
 
 /* ── Section headers ── */
-.section-header {
-    border-left: 3px solid #f97316;
-    padding-left: 0.6rem;
-    margin-top: 1rem;
-    margin-bottom: 0.5rem;
-    font-size: 0.85rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #94a3b8;
+.hud-section {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--hud-cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  margin: 1rem 0 0.6rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--hud-border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hud-section::before {
+  content: '//';
+  color: var(--hud-dim);
 }
 
-/* ── Sidebar group boxes ── */
-.sidebar-group {
-    background: #0a0f1a;
-    border: 1px solid #1e2d40;
-    border-radius: 6px;
-    padding: 0.7rem 0.8rem;
-    margin-bottom: 0.8rem;
+/* ── Metric grid ── */
+.metric-grid { display: flex; gap: 0.6rem; margin-bottom: 0.8rem; flex-wrap: nowrap; }
+.metric-card {
+  flex: 1;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-border);
+  padding: 0.8rem 0.9rem 0.9rem;
+  position: relative;
+  min-width: 0;
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
 }
-.sidebar-group-title {
-    font-size: 0.68rem;
-    color: #f97316;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    font-weight: 700;
-    margin-bottom: 0.5rem;
+/* corner brackets on metric cards */
+.metric-card .c { position: absolute; width: 8px; height: 8px; }
+.metric-card .c.tl { top: -1px;    left: -1px;   border-top:    1px solid; border-left:  1px solid; }
+.metric-card .c.tr { top: -1px;    right: -1px;  border-top:    1px solid; border-right: 1px solid; }
+.metric-card .c.bl { bottom: -1px; left: -1px;   border-bottom: 1px solid; border-left:  1px solid; }
+.metric-card .c.br { bottom: -1px; right: -1px;  border-bottom: 1px solid; border-right: 1px solid; }
+.metric-card.cyan .c   { color: var(--hud-cyan); }
+.metric-card.green .c  { color: var(--hud-green); }
+.metric-card.orange .c { color: var(--hud-orange); }
+.metric-card.red .c    { color: var(--hud-red); }
+.metric-card.amber .c  { color: var(--hud-amber); }
+.metric-card.purple .c { color: var(--hud-purple); }
+/* top accent bar */
+.metric-card::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 12%; right: 12%;
+  height: 1px;
 }
+.metric-card.cyan::after   { background: linear-gradient(90deg, transparent, var(--hud-cyan), transparent); }
+.metric-card.green::after  { background: linear-gradient(90deg, transparent, var(--hud-green), transparent); }
+.metric-card.orange::after { background: linear-gradient(90deg, transparent, var(--hud-orange), transparent); }
+.metric-card.red::after    { background: linear-gradient(90deg, transparent, var(--hud-red), transparent); }
+.metric-card.amber::after  { background: linear-gradient(90deg, transparent, var(--hud-amber), transparent); }
+.metric-card.purple::after { background: linear-gradient(90deg, transparent, var(--hud-purple), transparent); }
 
-/* ── Tabs ── */
-[data-testid="stTabs"] button {
-    font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 0.05em;
+/* ── Sidebar section titles ── */
+.sb-group {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  color: var(--hud-cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  padding: 0.3rem 0;
+  margin-bottom: 0.2rem;
+  border-bottom: 1px solid var(--hud-dim);
+  display: flex; align-items: center; gap: 6px;
 }
+.sb-group::before { content: '▸'; color: var(--hud-muted); font-size: 0.5rem; }
 
-/* ── Streamlit metric overrides ── */
-[data-testid="stMetricValue"]   { font-size: 1.6rem; font-weight: 700; color: #f1f5f9; }
-[data-testid="stMetricLabel"]   { font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; }
+/* ── Streamlit overrides ── */
+[data-testid="stMetricValue"] { font-family: var(--mono) !important; font-size: 1.4rem !important; font-weight: 400 !important; color: var(--hud-text) !important; }
+[data-testid="stMetricLabel"] { font-family: var(--mono) !important; font-size: 0.6rem !important; color: var(--hud-muted) !important; text-transform: uppercase !important; letter-spacing: 0.12em !important; }
 
-/* ── Expanders ── */
 [data-testid="stExpander"] {
-    background: #0d1117;
-    border: 1px solid #1e2d40;
-    border-radius: 6px;
+  background: var(--hud-card) !important;
+  border: 1px solid var(--hud-border) !important;
+  border-radius: 0 !important;
 }
-
-/* ── Dataframe ── */
-[data-testid="stDataFrame"] { border: 1px solid #1e2d40; border-radius: 6px; }
-
-/* ── Divider ── */
-hr { border-color: #1e2d40 !important; margin: 0.8rem 0 !important; }
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #070b14; }
-::-webkit-scrollbar-thumb { background: #1e2d40; border-radius: 3px; }
+[data-testid="stExpander"] summary {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hud-muted) !important;
+}
+[data-testid="stDataFrame"] {
+  border: 1px solid var(--hud-border) !important;
+  font-family: var(--mono) !important;
+  font-size: 0.72rem !important;
+}
+[data-testid="stButton"] button {
+  font-family: var(--mono) !important;
+  font-size: 0.72rem !important;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border-radius: 2px !important;
+  clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px));
+}
+[data-testid="stButton"] button[kind="primary"] {
+  background: rgba(0,212,255,0.12) !important;
+  border: 1px solid var(--hud-cyan) !important;
+  color: var(--hud-cyan) !important;
+  box-shadow: 0 0 16px rgba(0,212,255,0.2);
+}
+[data-testid="stButton"] button[kind="primary"]:hover {
+  background: rgba(0,212,255,0.2) !important;
+  box-shadow: 0 0 24px rgba(0,212,255,0.35);
+}
+.stSuccess { background: rgba(0,255,136,0.06) !important; border: 1px solid rgba(0,255,136,0.25) !important; color: var(--hud-green) !important; font-family: var(--mono) !important; font-size: 0.72rem !important; border-radius: 0 !important; }
+.stWarning { background: rgba(255,170,0,0.06) !important; border: 1px solid rgba(255,170,0,0.25) !important; color: var(--hud-amber) !important; font-family: var(--mono) !important; font-size: 0.72rem !important; border-radius: 0 !important; }
+hr { border-color: var(--hud-border) !important; margin: 0.7rem 0 !important; }
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--hud-bg); }
+::-webkit-scrollbar-thumb { background: var(--hud-dim); }
+p, li { font-family: var(--ui); }
+caption, .stCaption { font-family: var(--mono) !important; font-size: 0.62rem !important; color: var(--hud-muted) !important; letter-spacing: 0.06em; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ── BioGears cached call ───────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def cached_biogears(eva_intensity: float, eva_duration_min: float, recovery_min: float):
-    return get_biogears_segment(eva_intensity, eva_duration_min, recovery_min)
+def cached_biogears(eva_intensity: float, eva_duration_min: float, recovery_min: float, mode: str = "live"):
+    return get_biogears_segment(eva_intensity, eva_duration_min, recovery_min, mode=mode)
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+# ── Sidebar — Mission Control Panel ───────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:0.5rem">
-      <div style="font-size:1.4rem">🚀</div>
-      <div>
-        <div style="font-weight:800;font-size:0.95rem;color:#f1f5f9">Mission Control</div>
-        <div style="font-size:0.65rem;color:#475569;text-transform:uppercase;letter-spacing:0.1em">
-          Fatigue Digital Twin v1.0
-        </div>
+    <div style="padding:0.8rem 0 0.6rem">
+      <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
+                  letter-spacing:0.2em;text-transform:uppercase;margin-bottom:0.3rem">
+        System Online
+      </div>
+      <div style="font-family:var(--mono);font-size:1.0rem;color:var(--hud-cyan);
+                  text-shadow:0 0 8px rgba(0,212,255,0.6);letter-spacing:0.1em;text-transform:uppercase">
+        <span style="color:var(--hud-muted)">▸</span> ASTROGUARD
+      </div>
+      <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-dim);
+                  letter-spacing:0.12em;margin-top:0.1rem">
+        MISSION CONTROL · v1.0
       </div>
     </div>
     """, unsafe_allow_html=True)
     st.divider()
 
-    # ── BioGears group ──
-    st.markdown('<div class="sidebar-group-title">⚡ BioGears EVA Scenario</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sb-group">BioGears Source</div>', unsafe_allow_html=True)
+    bg_mode_label = st.radio(
+        "Mode",
+        options=["⚡ CSV  (instant)", "🔬 Live BioGears"],
+        index=0,
+        help=(
+            "CSV: loads a pre-computed run instantly — great for exploring parameters.\n"
+            "Live: actually runs bg-scenario.exe (~3-5 min) and saves result for future CSV use."
+        ),
+        horizontal=True,
+    )
+    bg_mode = "csv" if "CSV" in bg_mode_label else "live"
+    st.divider()
+
+    st.markdown('<div class="sb-group">EVA Scenario</div>', unsafe_allow_html=True)
     eva_intensity = st.slider(
-        "EVA Intensity", 0.10, 0.90, 0.50, 0.05,
+        "Intensity", 0.10, 0.90, 0.50, 0.05,
         help="Exercise intensity sent to BioGears (0=rest, 1=max exertion)",
     )
     eva_duration_min = st.slider(
-        "EVA Duration (min)", 20, 240, 90, 10,
+        "Duration (min)", 20, 240, 90, 10,
         help="Duration of the EVA exercise phase",
     )
     recovery_min = st.slider(
-        "Recovery Duration (min)", 10, 90, 30, 5,
+        "Recovery (min)", 10, 90, 30, 5,
         help="Post-EVA recovery phase duration",
     )
     st.divider()
 
-    # ── Mission group ──
-    st.markdown('<div class="sidebar-group-title">🛰 Mission Parameters</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sb-group">Mission Parameters</div>', unsafe_allow_html=True)
     mission_hours = st.select_slider(
-        "Mission Duration", options=[24, 48, 72], value=48,
+        "Duration", options=[24, 48, 72], value=48,
         help="Total simulated mission length",
     )
-    n_evas = st.slider(
-        "Number of EVAs", 1, 3, 1,
-        help="How many EVA events to schedule in the mission",
-    )
+    n_evas = st.slider("EVAs", 1, 3, 1, help="Number of EVA events in the mission")
     threshold = st.slider(
         "Risk Threshold", 0.50, 0.95, 0.80, 0.05,
         help="Fatigue level above which the astronaut is at risk",
     )
     st.divider()
 
-    # ── Monte Carlo group ──
-    st.markdown('<div class="sidebar-group-title">🎲 Monte Carlo</div>', unsafe_allow_html=True)
-    n_sims = st.select_slider(
-        "Simulations (N)", options=[10, 50, 100, 200, 500], value=100,
+    st.markdown('<div class="sb-group">Microgravity &amp; Physiology</div>', unsafe_allow_html=True)
+    mission_day = st.slider(
+        "Days in microgravity", 0, 180, 0, 1,
+        help=(
+            "Days the astronaut has been in space before this EVA.\n"
+            "Drives cardiovascular deconditioning (D = 1 + 0.008×day):\n"
+            "  • Resting HR rises +1.5 bpm/day (cap +18 bpm)\n"
+            "  • Fatigue accumulates faster, recovers slower"
+        ),
+    )
+    water_intake = st.slider(
+        "Water intake (L/rest-hour)", 0.0, 0.5, 0.25, 0.05,
+        help="Drinking rate during non-EVA time. Higher = better hydration = less fatigue penalty.",
+    )
+    meals_per_day = st.select_slider(
+        "Meals per day", options=[1, 2, 3, 4], value=3,
+        help="More meals = faster fatigue recovery. Meals are skipped during EVA.",
     )
     st.divider()
 
-    run_btn = st.button(
-        "▶  Run BioGears + Simulate",
-        type="primary",
-        use_container_width=True,
-    )
+    st.markdown('<div class="sb-group">Monte Carlo Engine</div>', unsafe_allow_html=True)
+    n_sims = st.select_slider("Simulations", options=[10, 50, 100, 200, 500], value=100)
+    st.divider()
 
-    st.markdown("""
-    <div style="margin-top:1rem;padding:0.7rem;background:#0a0f1a;border:1px solid #1e2d40;
-                border-radius:6px;font-size:0.65rem;color:#475569;text-transform:uppercase;
-                letter-spacing:0.08em;line-height:1.7">
-      BioGears 8.2.0<br>
-      BG_EVA_DUR = 10 min<br>
-      Fallback: synthesised signals<br>
-      MC seed = 42
+    run_btn = st.button("▶  EXECUTE SIMULATION", type="primary", use_container_width=True)
+
+    # Deconditioning factor info box
+    D_val        = 1.0 + 0.008 * mission_day
+    last_log     = st.session_state.get("last_log_path", "—")
+    last_log_name = last_log.split("\\")[-1] if last_log != "—" else "—"
+    st.markdown(f"""
+    <div style="margin-top:1rem;padding:0.7rem;background:var(--hud-surface);
+                border:1px solid var(--hud-dim);font-family:var(--mono);
+                font-size:0.55rem;color:var(--hud-muted);letter-spacing:0.1em;
+                text-transform:uppercase;line-height:2">
+      BioGears · 8.2.0<br>
+      MODE · {"PRECOMPUTED CSV" if bg_mode == "csv" else "LIVE ENGINE"}<br>
+      DECON FACTOR D · {D_val:.3f}<br>
+      HR OFFSET · +{min(1.5 * mission_day, 18):.1f} BPM<br>
+      MC_SEED · 42<br>
+      <span style="color:var(--hud-green)">LOG · {last_log_name}</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -296,10 +624,10 @@ with st.sidebar:
 # ── Run simulation ─────────────────────────────────────────────────────────────
 if run_btn or "simulation_done" not in st.session_state:
 
-    with st.spinner("Running BioGears EVA simulation…"):
+    with st.spinner("Initialising BioGears EVA scenario…"):
         t0 = time.time()
         biogears_df, used_real, bg_msg = cached_biogears(
-            eva_intensity, eva_duration_min, recovery_min
+            eva_intensity, eva_duration_min, recovery_min, bg_mode
         )
         bg_elapsed = time.time() - t0
 
@@ -316,6 +644,21 @@ if run_btn or "simulation_done" not in st.session_state:
             mission_hours=mission_hours,
             eva_duration_min=eva_duration_min,
             recovery_min=recovery_min,
+            mission_day=mission_day,
+            seed=0,
+        )
+        hydration_arr = build_hydration_timeline(
+            events=events,
+            mission_hours=mission_hours,
+            eva_intensity=eva_intensity,
+            water_intake_L_per_rest_hour=water_intake,
+            seed=0,
+        )
+        food_arr = build_food_timeline(
+            events=events,
+            mission_hours=mission_hours,
+            eva_intensity=eva_intensity,
+            meals_per_day=meals_per_day,
             seed=0,
         )
 
@@ -323,13 +666,16 @@ if run_btn or "simulation_done" not in st.session_state:
         hr_arr=mission_df["HeartRate"].values,
         events=events,
         threshold=threshold,
+        mission_day=mission_day,
+        hydration_arr=hydration_arr,
+        food_arr=food_arr,
     )
     bg_fatigue = normalise_biogears_fatigue(biogears_df, len(fatigue))
 
     analytics = single_run_analytics(fatigue, threshold=threshold, mission_hours=mission_hours)
     status_label, status_color = mission_status(analytics, threshold)
 
-    with st.spinner(f"Running {n_sims} Monte Carlo simulations…"):
+    with st.spinner(f"Running {n_sims} Monte Carlo trajectories…"):
         mc = run_monte_carlo(
             biogears_df=biogears_df,
             mission_hours=mission_hours,
@@ -339,6 +685,9 @@ if run_btn or "simulation_done" not in st.session_state:
             n_sims=n_sims,
             threshold=threshold,
             n_evas=n_evas,
+            mission_day=mission_day,
+            water_intake=water_intake,
+            meals_per_day=meals_per_day,
         )
     mc_sum = mc_summary(mc)
 
@@ -348,8 +697,11 @@ if run_btn or "simulation_done" not in st.session_state:
         "used_real":       used_real,
         "bg_msg":          bg_msg,
         "bg_elapsed":      bg_elapsed,
+        "bg_mode":         bg_mode,
         "events":          events,
         "mission_df":      mission_df,
+        "hydration_arr":   hydration_arr,
+        "food_arr":        food_arr,
         "fatigue":         fatigue,
         "bg_fatigue":      bg_fatigue,
         "risk_periods":    risk_periods,
@@ -358,13 +710,41 @@ if run_btn or "simulation_done" not in st.session_state:
         "status_color":    status_color,
         "mc":              mc,
         "mc_sum":          mc_sum,
+        "mission_day":     mission_day,
     })
+
+    log_path = save_mission_log(
+        eva_intensity=eva_intensity,
+        eva_duration_min=eva_duration_min,
+        recovery_min=recovery_min,
+        mission_hours=mission_hours,
+        n_evas=n_evas,
+        threshold=threshold,
+        bg_mode=bg_mode,
+        n_sims=n_sims,
+        mission_day=mission_day,
+        water_intake=water_intake,
+        meals_per_day=meals_per_day,
+        events=events,
+        mission_df=mission_df,
+        fatigue=fatigue,
+        hydration_arr=hydration_arr,
+        food_arr=food_arr,
+        analytics=analytics,
+        mc_sum=mc_sum,
+        status_label=status_label,
+        status_color=status_color,
+        bg_msg=bg_msg,
+    )
+    st.session_state["last_log_path"] = str(log_path)
+
 
 # ── Load from session state ────────────────────────────────────────────────────
 ss            = st.session_state
 biogears_df   = ss["biogears_df"]
 used_real     = ss["used_real"]
 bg_msg        = ss["bg_msg"]
+bg_mode_used  = ss.get("bg_mode", "live")
 events        = ss["events"]
 mission_df    = ss["mission_df"]
 fatigue       = ss["fatigue"]
@@ -375,6 +755,7 @@ status_label  = ss["status_label"]
 status_color  = ss["status_color"]
 mc            = ss["mc"]
 mc_sum        = ss["mc_sum"]
+mission_day_used = ss.get("mission_day", 0)
 
 mission_min          = len(fatigue)
 mission_hours_actual = mission_min // 60
@@ -384,96 +765,172 @@ at_risk              = analytics["time_at_risk_pct"]
 p_breach             = mc_sum["p_any_breach"] * 100
 
 
+# ── G: Alert banner ─────────────────────────────────────────────────────────────
+if status_label == "ABORT":
+    st.markdown(
+        '<div class="alert-banner alert-abort">'
+        '⚠ MASTER CAUTION &nbsp;·&nbsp; FATIGUE THRESHOLD BREACHED '
+        '&nbsp;·&nbsp; MISSION ABORT RECOMMENDED &nbsp;·&nbsp; ⚠'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+elif status_label == "MONITOR":
+    st.markdown(
+        '<div class="alert-banner alert-monitor">'
+        '⚡ CAUTION &nbsp;·&nbsp; ELEVATED FATIGUE DETECTED '
+        '&nbsp;·&nbsp; MONITOR ASTRONAUT STATUS &nbsp;·&nbsp; ⚡'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ── Hero title ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<div style="
+  text-align:center;
+  padding: 2.2rem 0 1.4rem 0;
+  letter-spacing: 0.18em;
+  font-family: 'Orbitron', sans-serif;
+  font-weight: 900;
+  font-size: clamp(2rem, 5vw, 3.6rem);
+  color: #00d4ff;
+  text-shadow:
+    0 0 10px rgba(0,212,255,1),
+    0 0 30px rgba(0,212,255,0.7),
+    0 0 60px rgba(0,212,255,0.35),
+    0 0 100px rgba(0,212,255,0.15);
+  text-transform: uppercase;
+  user-select: none;
+">
+  ASTROGUARD
+  <span style="
+    display:block;
+    font-size: clamp(0.65rem, 1.6vw, 1.0rem);
+    font-weight: 700;
+    color: rgba(0,212,255,0.55);
+    letter-spacing: 0.55em;
+    margin-top: 0.35rem;
+    text-shadow: 0 0 8px rgba(0,212,255,0.4);
+  ">ASTRONAUT HEALTH DIGITAL TWIN</span>
+</div>
+""", unsafe_allow_html=True)
+
 # ── Mission banner ─────────────────────────────────────────────────────────────
-bg_source = "LIVE BIOGEARS" if used_real else "SYNTHESISED FALLBACK"
-bg_badge_color = "#22c55e" if used_real else "#eab308"
-bg_badge_bg    = "rgba(34,197,94,0.15)" if used_real else "rgba(234,179,8,0.15)"
-bg_badge_border = "rgba(34,197,94,0.4)" if used_real else "rgba(234,179,8,0.4)"
+if used_real and bg_mode_used == "live":
+    ping_class, badge_class, bg_src_text = "green", "nominal",  "BIOGEARS LIVE"
+elif used_real and bg_mode_used == "csv":
+    ping_class, badge_class, bg_src_text = "green", "nominal",  "PRE-COMPUTED CSV"
+else:
+    ping_class, badge_class, bg_src_text = "amber", "fallback", "SYNTH FALLBACK"
 
 st.markdown(f"""
 <div class="mission-banner">
   <div>
-    <p class="mission-title">🚀 Astronaut Health Digital Twin</p>
-    <p class="mission-subtitle">Musculoskeletal Fatigue &amp; Injury Risk Monitor &nbsp;·&nbsp;
-       BioGears Cardiovascular Physiology &nbsp;·&nbsp; Monte Carlo Risk Analysis</p>
-    <p class="ref-tag">RES-HSFC-2025-001 &nbsp;·&nbsp; {mission_hours_actual}h Mission &nbsp;·&nbsp;
-       EVA intensity {eva_intensity:.0%} &nbsp;·&nbsp; Threshold {threshold:.0%}</p>
+    <p class="mission-title hud-title-glow">▸ ASTROGUARD · HEALTH DIGITAL TWIN</p>
+    <p class="mission-subtitle">
+      Musculoskeletal Fatigue Monitor &nbsp;·&nbsp;
+      BioGears Cardiovascular Engine &nbsp;·&nbsp;
+      Monte Carlo Risk Analysis
+    </p>
+    <p class="mission-ref">
+      RES-HSFC-2025-001 &nbsp;|&nbsp;
+      MISSION-T+{mission_hours_actual}H &nbsp;|&nbsp;
+      EVA-INT {eva_intensity:.0%} &nbsp;|&nbsp;
+      THRESHOLD {threshold:.0%} &nbsp;|&nbsp;
+      MC-N {n_sims}
+    </p>
   </div>
   <div style="text-align:right">
-    <div style="font-size:0.7rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;
-                color:{bg_badge_color};background:{bg_badge_bg};border:1px solid {bg_badge_border};
-                border-radius:2em;padding:0.25em 1em;display:inline-block;margin-bottom:0.4rem">
-      ● LIVE
+    <div class="live-badge {badge_class}">
+      <span class="ping-dot {ping_class}"></span>
+      {bg_src_text}
     </div>
-    <div style="font-size:0.65rem;color:#475569;margin-top:0.3rem">{bg_source}</div>
+    <div style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-dim);
+                margin-top:0.5rem;letter-spacing:0.1em;text-transform:uppercase">
+      {bg_msg[:55]}
+    </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
 
-# ── BioGears status strip ──────────────────────────────────────────────────────
+# ── BioGears status ────────────────────────────────────────────────────────────
 if used_real:
-    st.success(f"**BioGears** (live run) — {bg_msg}", icon="🔬")
+    st.success(f"BioGears live run complete — {bg_msg}", icon="🔬")
 else:
-    st.warning(f"**BioGears** (fallback) — {bg_msg}", icon="⚠️")
+    st.warning(f"Fallback active — {bg_msg}", icon="⚠️")
 
 
-# ── Metric cards ───────────────────────────────────────────────────────────────
-status_accent = {"SAFE": "green", "MONITOR": "yellow", "ABORT": "red"}.get(status_label, "blue")
-trend_icon = {"Rising": "↑", "Falling": "↓", "Stable": "→"}.get(analytics["trend_label"], "")
-trend_class = {"Rising": "up", "Falling": "down", "Stable": ""}.get(analytics["trend_label"], "")
-delta_sign  = "up" if peak_f > threshold else "down"
+# ── HUD Metric Cards ───────────────────────────────────────────────────────────
+status_hud = {"SAFE": "green", "MONITOR": "amber", "ABORT": "red"}.get(status_label, "cyan")
+status_ping = {"SAFE": "green", "MONITOR": "amber", "ABORT": "red"}.get(status_label, "green")
+trend_sym  = {"Rising": "▲", "Falling": "▼", "Stable": "■"}.get(analytics["trend_label"], "—")
+trend_cls  = {"Rising": "up", "Falling": "down", "Stable": ""}.get(analytics["trend_label"], "")
+delta_cls  = "up" if peak_f > threshold else "down"
+delta_val  = peak_f - threshold
 
 st.markdown(f"""
 <div class="metric-grid">
 
-  <div class="metric-card {status_accent}">
-    <div class="metric-label">Mission Status</div>
-    <div class="metric-value"
-         style="font-size:1.25rem;color:{status_color}">{status_label}</div>
-    <div class="metric-delta">Trend: {trend_icon} {analytics["trend_label"]}</div>
+  <div class="metric-card {status_hud}">
+    <span class="c tl"></span><span class="c tr"></span>
+    <span class="c bl"></span><span class="c br"></span>
+    <div class="hud-label">Mission Status</div>
+    <div class="hud-value {status_hud}" style="font-size:1.3rem;display:flex;align-items:center;gap:6px">
+      <span class="ping-dot {status_ping}"></span>{status_label}
+    </div>
+    <div class="hud-sub {trend_cls}">{trend_sym} {analytics["trend_label"]}</div>
   </div>
 
   <div class="metric-card orange">
-    <div class="metric-label">Peak Fatigue</div>
-    <div class="metric-value">{peak_f:.3f}</div>
-    <div class="metric-delta {delta_sign}">{peak_f - threshold:+.3f} vs threshold</div>
+    <span class="c tl"></span><span class="c tr"></span>
+    <span class="c bl"></span><span class="c br"></span>
+    <div class="hud-label">Peak Fatigue</div>
+    <div class="hud-value orange">{peak_f:.3f}</div>
+    <div class="hud-sub {delta_cls}">{delta_val:+.3f} vs threshold</div>
   </div>
 
-  <div class="metric-card blue">
-    <div class="metric-label">Peak at Hour</div>
-    <div class="metric-value">H+{peak_h}</div>
-    <div class="metric-delta">of {mission_hours_actual}h mission</div>
+  <div class="metric-card cyan">
+    <span class="c tl"></span><span class="c tr"></span>
+    <span class="c bl"></span><span class="c br"></span>
+    <div class="hud-label">Peak Hour</div>
+    <div class="hud-value cyan">H+{peak_h:02d}</div>
+    <div class="hud-sub">of {mission_hours_actual}h mission</div>
   </div>
 
   <div class="metric-card purple">
-    <div class="metric-label">Time at Risk</div>
-    <div class="metric-value">{at_risk:.1f}%</div>
-    <div class="metric-delta">minutes above threshold</div>
+    <span class="c tl"></span><span class="c tr"></span>
+    <span class="c bl"></span><span class="c br"></span>
+    <div class="hud-label">Time at Risk</div>
+    <div class="hud-value" style="color:var(--hud-purple)">{at_risk:.1f}<span style="font-size:1rem">%</span></div>
+    <div class="hud-sub">above threshold</div>
   </div>
 
   <div class="metric-card red">
-    <div class="metric-label">P(Breach) MC</div>
-    <div class="metric-value">{p_breach:.1f}%</div>
-    <div class="metric-delta">{n_sims} simulations</div>
+    <span class="c tl"></span><span class="c tr"></span>
+    <span class="c bl"></span><span class="c br"></span>
+    <div class="hud-label">P(Breach)</div>
+    <div class="hud-value red">{p_breach:.1f}<span style="font-size:1rem">%</span></div>
+    <div class="hud-sub">{n_sims} MC trajectories</div>
   </div>
 
 </div>
 """, unsafe_allow_html=True)
 
 
-# ── Tabs ───────────────────────────────────────────────────────────────────────
+# ── I: HUD Tab navigation ──────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📈  Mission Overview",
-    "⚠️  Risk Analysis",
-    "🔵  Phase Space",
-    "🎲  Monte Carlo",
+    "PHYSIO · OVERVIEW",
+    "RISK · ANALYSIS",
+    "DYNAMICS · PHASE",
+    "MC · SIMULATION",
 ])
 
 
 # ── Tab 1: Mission Overview ────────────────────────────────────────────────────
 with tab1:
-    st.markdown('<div class="section-header">Physiological Time-Series</div>',
+    st.markdown('<div class="hud-section">Physiological Time-Series</div>',
                 unsafe_allow_html=True)
     st.plotly_chart(
         plot_mission_overview(mission_df, events, fatigue, bg_fatigue, threshold),
@@ -483,7 +940,7 @@ with tab1:
     col_sched, col_bg = st.columns(2)
 
     with col_sched:
-        with st.expander("📅  Mission Event Schedule"):
+        with st.expander("// MISSION EVENT SCHEDULE"):
             rows = []
             for ev in events:
                 rows.append({
@@ -496,9 +953,9 @@ with tab1:
             st.dataframe(rows, use_container_width=True)
 
     with col_bg:
-        with st.expander("🔬  BioGears Raw EVA Segment"):
+        with st.expander("// BIOGEARS RAW EVA SEGMENT"):
             src = "Live BioGears" if used_real else "Synthesised fallback"
-            st.markdown(f"**Source:** {src} &nbsp;·&nbsp; {len(biogears_df)} rows")
+            st.caption(f"Source: {src} · Rows: {len(biogears_df)}")
             st.plotly_chart(plot_biogears_raw(biogears_df), use_container_width=True)
 
 
@@ -510,61 +967,74 @@ with tab2:
         st.plotly_chart(make_risk_gauge(peak_f, threshold), use_container_width=True)
 
     with col_info:
-        st.markdown('<div class="section-header">Fatigue Trend Analysis</div>',
+        st.markdown('<div class="hud-section">Fatigue Trend Analysis</div>',
                     unsafe_allow_html=True)
 
-        # Info grid
         trend      = analytics["trend_label"]
         trend_icon = {"Rising": "📈", "Falling": "📉", "Stable": "➡️"}.get(trend, "")
+
         st.markdown(f"""
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem;margin-bottom:1rem">
-  <div style="background:#111827;border:1px solid #1e2d40;border-radius:6px;padding:0.7rem 1rem">
-    <div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.08em">
-      End-of-mission trend</div>
-    <div style="font-size:1.15rem;font-weight:700;color:#f1f5f9;margin-top:0.2rem">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.8rem">
+
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
+              padding:0.7rem 0.9rem;position:relative;
+              clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
+    <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
+                text-transform:uppercase;letter-spacing:0.12em">End-of-mission trend</div>
+    <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-text);margin-top:0.2rem">
       {trend_icon} {trend}</div>
   </div>
-  <div style="background:#111827;border:1px solid #1e2d40;border-radius:6px;padding:0.7rem 1rem">
-    <div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.08em">
-      Slope (per minute)</div>
-    <div style="font-size:1.15rem;font-weight:700;color:#f1f5f9;margin-top:0.2rem">
+
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
+              padding:0.7rem 0.9rem;
+              clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
+    <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
+                text-transform:uppercase;letter-spacing:0.12em">Slope · per minute</div>
+    <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-text);margin-top:0.2rem">
       {analytics["trend_slope"]:.6f}</div>
   </div>
-  <div style="background:#111827;border:1px solid #1e2d40;border-radius:6px;padding:0.7rem 1rem">
-    <div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.08em">
-      Peak fatigue</div>
-    <div style="font-size:1.15rem;font-weight:700;color:#f97316;margin-top:0.2rem">
-      {peak_f:.4f} @ H+{peak_h}</div>
+
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
+              padding:0.7rem 0.9rem;
+              clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
+    <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
+                text-transform:uppercase;letter-spacing:0.12em">Peak fatigue</div>
+    <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-orange);
+                text-shadow:var(--glow-orange);margin-top:0.2rem">
+      {peak_f:.4f} · H+{peak_h:02d}</div>
   </div>
-  <div style="background:#111827;border:1px solid #1e2d40;border-radius:6px;padding:0.7rem 1rem">
-    <div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.08em">
-      MC worst-case</div>
-    <div style="font-size:1.15rem;font-weight:700;color:#ef4444;margin-top:0.2rem">
+
+  <div style="background:var(--hud-card);border:1px solid var(--hud-border);
+              padding:0.7rem 0.9rem;
+              clip-path:polygon(0 0,calc(100% - 6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100% - 6px))">
+    <div style="font-family:var(--mono);font-size:0.58rem;color:var(--hud-muted);
+                text-transform:uppercase;letter-spacing:0.12em">MC worst-case</div>
+    <div style="font-family:var(--mono);font-size:1.1rem;color:var(--hud-red);
+                text-shadow:var(--glow-red);margin-top:0.2rem">
       {mc_sum["worst_case_fatigue"]:.4f}</div>
   </div>
+
 </div>
 """, unsafe_allow_html=True)
 
-    # Risk flag log
-    st.markdown('<div class="section-header">Risk Flag Log</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hud-section">Risk Flag Log</div>', unsafe_allow_html=True)
     if risk_periods:
         flag_rows = [
             {
-                "Flag #":       i,
+                "Flag":         f"RF-{i:02d}",
                 "Start":        f"H+{s // 60}h {s % 60:02d}m",
                 "End":          f"H+{e // 60}h {e % 60:02d}m",
                 "Duration":     f"{e - s} min",
-                "Peak fatigue": f"{fatigue[s:e].max():.4f}",
+                "Peak Fatigue": f"{fatigue[s:e].max():.4f}",
             }
             for i, (s, e) in enumerate(risk_periods, 1)
         ]
         st.dataframe(flag_rows, use_container_width=True)
     else:
-        st.success("No risk threshold breaches in this simulation run.", icon="✅")
+        st.success("// NO RISK THRESHOLD BREACHES DETECTED", icon="✅")
 
-    # Physiology at peak
     peak_idx = analytics["peak_minute"]
-    st.markdown('<div class="section-header">Physiological State at Peak Fatigue</div>',
+    st.markdown('<div class="hud-section">Physiological State at Peak Fatigue</div>',
                 unsafe_allow_html=True)
     row      = mission_df.iloc[peak_idx]
     spo2_val = row["OxygenSaturation"]
@@ -580,11 +1050,11 @@ with tab2:
 
 # ── Tab 3: Phase Space ─────────────────────────────────────────────────────────
 with tab3:
-    st.markdown('<div class="section-header">HR vs Fatigue Phase Space</div>',
+    st.markdown('<div class="hud-section">HR vs Fatigue Phase Space</div>',
                 unsafe_allow_html=True)
     st.caption(
-        "Each point is one mission minute. Colour = mission time (dark→early, bright→late). "
-        "The red band marks the risk zone. Trajectory shape reveals how workload and fatigue co-evolve."
+        "// Each point = one mission minute · colour = mission time (dark→early, bright→late) "
+        "· red band = risk zone · trajectory reveals workload-fatigue coupling"
     )
     st.plotly_chart(
         plot_phase_space(mission_df, fatigue, threshold),
@@ -595,62 +1065,70 @@ with tab3:
 # ── Tab 4: Monte Carlo ─────────────────────────────────────────────────────────
 with tab4:
     st.markdown(
-        f'<div class="section-header">Monte Carlo Results — {n_sims} simulations</div>',
+        f'<div class="hud-section">Monte Carlo · {n_sims} Trajectories</div>',
         unsafe_allow_html=True,
     )
 
     mc1, mc2, mc3 = st.columns(3)
-    mc1.metric("P(any breach)",     f"{mc_sum['p_any_breach']*100:.1f}%",
-               help="Fraction of runs that crossed the threshold at any point")
+    mc1.metric("P(any breach)",    f"{mc_sum['p_any_breach']*100:.1f}%",
+               help="Fraction of MC runs that crossed threshold")
     mc2.metric("Mean peak fatigue", f"{mc_sum['mean_peak_fatigue']:.4f}")
     mc3.metric("Worst-case",        f"{mc_sum['worst_case_fatigue']:.4f}")
 
     st.plotly_chart(plot_monte_carlo_envelope(mc, threshold), use_container_width=True)
 
-    st.markdown('<div class="section-header">Simulation Heatmap</div>',
-                unsafe_allow_html=True)
-    st.caption("Each row is one simulation. Red = high fatigue, green = low.")
+    st.markdown('<div class="hud-section">Simulation Heatmap</div>', unsafe_allow_html=True)
+    st.caption("// Each row = one simulation · red = high fatigue · green = nominal")
     st.plotly_chart(plot_risk_heatmap(mc), use_container_width=True)
 
-    with st.expander("📊  Peak Fatigue Distribution"):
+    with st.expander("// PEAK FATIGUE DISTRIBUTION"):
         import plotly.graph_objects as _pgo
 
-        hist_data = mc["max_per_sim"]
-        hist_fig  = _pgo.Figure()
+        hist_fig = _pgo.Figure()
         hist_fig.add_trace(_pgo.Histogram(
-            x=hist_data,
+            x=mc["max_per_sim"],
             nbinsx=30,
-            marker_color="#f97316",
-            opacity=0.8,
+            marker=dict(color="#ff6b00", opacity=0.75,
+                        line=dict(color="#0c2040", width=0.5)),
             name="Peak fatigue",
+            hovertemplate="Fatigue %{x:.3f} · %{y} runs<extra></extra>",
         ))
         hist_fig.add_vline(
-            x=threshold, line_dash="dash", line_color="#ef4444", line_width=2,
-            annotation_text=f"Threshold {threshold:.2f}",
-            annotation_font_color="#ef4444",
+            x=threshold, line=dict(color="#ff1a3c", dash="dash", width=2),
+            annotation_text=f" Threshold {threshold:.2f}",
+            annotation_font=dict(color="#ff1a3c", size=10, family="Share Tech Mono"),
+            annotation_position="top right",
         )
         hist_fig.update_layout(
             template="plotly_dark",
-            paper_bgcolor="#0d1117",
-            plot_bgcolor="#070b14",
-            height=320,
-            margin=dict(t=40, b=40, l=50, r=30),
-            title=dict(text="Distribution of Peak Fatigue across MC Runs",
-                       font=dict(size=13), x=0.01),
-            xaxis_title="Peak Fatigue per Simulation",
-            yaxis_title="Count",
-            bargap=0.05,
+            paper_bgcolor="#060c18",
+            plot_bgcolor="#030608",
+            height=300,
+            margin=dict(t=36, b=36, l=48, r=24),
+            title=dict(text="// PEAK FATIGUE DISTRIBUTION · MC RUNS",
+                       font=dict(size=11, family="Share Tech Mono", color="#1e4060"), x=0.01),
+            xaxis=dict(title_text="Peak Fatigue", gridcolor="rgba(0,212,255,0.04)",
+                       linecolor="#0c2040", tickfont=dict(family="Share Tech Mono", size=10)),
+            yaxis=dict(title_text="Count", gridcolor="rgba(0,212,255,0.04)",
+                       linecolor="#0c2040", tickfont=dict(family="Share Tech Mono", size=10)),
+            bargap=0.06,
+            font=dict(family="Share Tech Mono", color="#1e4060"),
         )
         st.plotly_chart(hist_fig, use_container_width=True)
 
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("""
-<hr style="margin:1.5rem 0 0.6rem">
-<div style="display:flex;justify-content:space-between;align-items:center;
-            font-size:0.65rem;color:#334155;letter-spacing:0.06em;text-transform:uppercase">
-  <span>Astronaut Health Digital Twin &nbsp;·&nbsp; BioGears 8.2.0 &nbsp;·&nbsp;
-        Musculoskeletal Fatigue &amp; Injury Risk</span>
-  <span>RESPOND Basket 2025 &nbsp;·&nbsp; RES-HSFC-2025-001</span>
+<div style="margin-top:1.5rem;padding:0.6rem 0;
+            border-top:1px solid var(--hud-border);
+            display:flex;justify-content:space-between;align-items:center">
+  <span style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-dim);
+               letter-spacing:0.12em;text-transform:uppercase">
+    AstroGuard · BioGears 8.2.0 · Musculoskeletal Fatigue &amp; Injury Risk
+  </span>
+  <span style="font-family:var(--mono);font-size:0.55rem;color:var(--hud-dim);
+               letter-spacing:0.12em;text-transform:uppercase">
+    RESPOND Basket 2025 · RES-HSFC-2025-001
+  </span>
 </div>
 """, unsafe_allow_html=True)

@@ -15,7 +15,7 @@ import pandas as pd
 from scipy import stats
 
 from simulation.events import sample_events
-from simulation.health_vars import build_mission_timeline
+from simulation.health_vars import build_mission_timeline, build_hydration_timeline, build_food_timeline
 from simulation.fatigue import compute_fatigue
 
 
@@ -103,6 +103,9 @@ def run_monte_carlo(
     n_sims: int = 100,
     threshold: float = 0.80,
     n_evas: int = 1,
+    mission_day: int = 0,
+    water_intake: float = 0.25,
+    meals_per_day: float = 3.0,
     base_seed: int = 42,
 ) -> Dict:
     """
@@ -148,13 +151,33 @@ def run_monte_carlo(
             mission_hours=mission_hours,
             eva_duration_min=eva_duration_min,
             recovery_min=recovery_min,
+            mission_day=mission_day,
             seed=seed + 1,
+        )
+
+        hydration_i = build_hydration_timeline(
+            events=events_i,
+            mission_hours=mission_hours,
+            eva_intensity=intensity_i,
+            water_intake_L_per_rest_hour=water_intake,
+            seed=seed + 2,
+        )
+
+        food_i = build_food_timeline(
+            events=events_i,
+            mission_hours=mission_hours,
+            eva_intensity=intensity_i,
+            meals_per_day=meals_per_day,
+            seed=seed + 3,
         )
 
         fatigue_i, _ = compute_fatigue(
             hr_arr=mission_df_i["HeartRate"].values,
             events=events_i,
             threshold=threshold,
+            mission_day=mission_day,
+            hydration_arr=hydration_i,
+            food_arr=food_i,
         )
         fatigue_matrix[i] = fatigue_i
 
