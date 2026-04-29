@@ -10,7 +10,12 @@ BioGears patient data and NASA ISS research — no abstract sliders:
   4. Protein recovery adequacy          (protein_g, weight_kg)
   5. Microgravity deconditioning        (MicrogravityFactors from patient.py)
 
-BioGears' own FatigueLevel is displayed alongside this model in the UI.
+When bg_calibration is supplied (from extract_biogears_calibration()), the model
+uses BioGears-measured rates instead of the hardcoded constants:
+  - eva_fatigue_rate_per_min      replaces _RATE_EVA_ACCUMULATE
+  - glycogen_depletion_g_per_min  replaces _GLY_DEPLETION_PER_MIN
+  - glycogen_start_g              replaces glycogen_max * 0.80
+  - sweat_rate_mg_per_min         feeds _hydration_state() via actual water loss
 """
 from __future__ import annotations
 
@@ -44,6 +49,8 @@ def compute_fatigue(
     daily_water_L:      float = 2.0,     # L  — BioGears Water field
     sodium_mg_per_day:  float = 1000.0,  # mg — BioGears Sodium field (normalised)
     sleep_hours:        float = 8.0,     # hr — BioGears SleepAmount field
+    # ── BioGears-measured calibration (from extract_biogears_calibration()) ──
+    bg_calibration:     Optional[dict]                    = None,
     # ── Legacy / backward-compat fallback ────────────────────────────────────
     mission_day:        int   = 0,       # used only when mg_factors is None
     baseline_hr:        float = 72.0,    # used only when patient is None
@@ -55,32 +62,11 @@ def compute_fatigue(
     """
     Compute per-minute fatigue and glycogen fraction for the mission timeline.
 
-    Parameters
-    ----------
-    hr_arr             : heart-rate array at 1-minute resolution [mission_min]
-    events             : MissionEvent list from the event engine
-    threshold          : risk threshold [0, 1] — fatigue above this = at risk
-    patient            : PatientProfile from patient.py (supplies HR baseline,
-                         lean mass, weight_kg, hr_max)
-    mg_factors         : MicrogravityFactors from patient.microgravity_factors()
-                         (supplies vo2max_factor, glycogen_factor, hr_offset)
-    carb_g_per_meal    : grams carbohydrate per meal (BioGears Carbohydrate)
-    protein_g_per_meal : grams protein per meal (BioGears Protein)
-    meals_per_day      : number of meals per day
-    daily_water_L      : total water intake in litres/day (BioGears Water)
-    sodium_mg_per_day  : total sodium in mg/day (BioGears Sodium, normalised)
-    sleep_hours        : hours of sleep per night (BioGears SleepAmount)
-    mission_day        : days in space — used to build mg_factors if not supplied
-
-    Fatigue update equations
-    ------------------------
-    hr_norm  = (HR[i] − hr_baseline_mg) / (hr_max − hr_baseline_mg)   clipped [0,1]
-    glycogen_fraction = glycogen_g / glycogen_max                       [0,1]
-
-    EVA:   Δ = R_eva × (hr_norm / vo2max_factor) × hydration_penalty
-                      × (1 + 0.6×(1−glycogen_fraction)) × sleep_debt_penalty
-    Sleep: Δ = −R_sleep × vo2max_factor × protein_recovery × (sleep_hours/8)
-    Rest:  Δ = −R_rest  × (1−hr_norm) × protein_recovery / sleep_debt_penalty
+    When bg_calibration is supplied, the model uses BioGears-measured rates:
+      - eva_fatigue_rate_per_min      → replaces _RATE_EVA_ACCUMULATE
+      - glycogen_depletion_g_per_min  → replaces _GLY_DEPLETION_PER_MIN
+      - glycogen_start_g              → replaces glycogen_max × 0.80
+      - sweat_rate_mg_per_min         → feeds into hydration via actual sweat loss
 
     Returns
     -------
@@ -115,19 +101,34 @@ def compute_fatigue(
     vo2max_factor   = mg.vo2max_factor
     glycogen_max    = _glycogen_init(p_lean_mass, mg.glycogen_factor)
 
+    # ── BioGears-calibrated rates (override defaults when available) ──────────
+    if bg_calibration:
+        rate_eva      = float(bg_calibration.get("eva_fatigue_rate_per_min",
+                                                  _RATE_EVA_ACCUMULATE))
+        gly_depl_rate = float(bg_calibration.get("glycogen_depletion_g_per_min",
+                                                  _GLY_DEPLETION_PER_MIN))
+        glycogen_g    = float(bg_calibration.get("glycogen_start_g",
+                                                  glycogen_max * 0.80))
+        # Actual sweat-adjusted hydration: if we lose more water than we drink, deficit worsens
+        sweat_mg_min  = float(bg_calibration.get("sweat_rate_mg_per_min", 600.0))
+        sweat_L_day   = sweat_mg_min * 60 * 24 / 1e6   # mg/min → L/day (full-day equivalent)
+        hyd           = _hydration_state(daily_water_L, sodium_mg_per_day,
+                                         sweat_loss_L_per_day=sweat_L_day)
+    else:
+        rate_eva      = _RATE_EVA_ACCUMULATE
+        gly_depl_rate = _GLY_DEPLETION_PER_MIN
+        glycogen_g    = glycogen_max * 0.80
+        hyd           = _hydration_state(daily_water_L, sodium_mg_per_day)
+
     # ── Pre-compute mission-constant scalars ──────────────────────────────────
-    hyd             = _hydration_state(daily_water_L, sodium_mg_per_day)
     hyd_penalty     = _hydration_penalty(hyd)
     prot_recovery   = _protein_recovery_factor(protein_g_per_meal, meals_per_day, p_weight_kg)
     sleep_penalty   = _sleep_debt_penalty(sleep_hours, mission_day if mg_factors is None else mg.mission_day)
 
-    # ── Initial glycogen at mission start (assume 80% full — realistic pre-EVA) ─
-    glycogen_g      = glycogen_max * 0.80
-
     # ── Output arrays ─────────────────────────────────────────────────────────
     fatigue             = np.zeros(mission_min)
     glycogen_fraction   = np.zeros(mission_min)
-    glycogen_fraction[0]= glycogen_g / glycogen_max
+    glycogen_fraction[0]= glycogen_g / max(glycogen_max, 1.0)
 
     for i in range(1, mission_min):
         prev      = fatigue[i - 1]
@@ -140,12 +141,13 @@ def compute_fatigue(
         ev = get_event_at_minute(events, i)
 
         if ev is not None and ev.event_type == EventType.EVA:
-            delta      = (_RATE_EVA_ACCUMULATE
+            delta      = (rate_eva
                           * (hr_norm / max(vo2max_factor, 0.01))
                           * hyd_penalty
                           * gly_penalty
                           * sleep_penalty)
-            glycogen_g = max(0.0, glycogen_g - _glycogen_depletion(ev.intensity))
+            # Use BioGears-measured depletion rate scaled by current intensity
+            glycogen_g = max(0.0, glycogen_g - gly_depl_rate * float(np.clip(ev.intensity, 0, 1)))
 
         elif ev is not None and ev.event_type == EventType.SLEEP:
             sleep_rate = _RATE_SLEEP_RECOVER * vo2max_factor * prot_recovery * (sleep_hours / 8.0)
@@ -251,19 +253,22 @@ _SODIUM_REFERENCE_MG      = 1500.0 # mg/day below which no extra water needed
 _SODIUM_WATER_COUPLING    = 1.5e-4  # L extra water needed per mg sodium above reference
 
 
-def _hydration_state(daily_water_L: float, sodium_mg_per_day: float) -> float:
+def _hydration_state(daily_water_L: float, sodium_mg_per_day: float,
+                     sweat_loss_L_per_day: float = 0.0) -> float:
     """
     Compute instantaneous hydration level [0, 1] from daily intake and sodium.
 
-    Sodium above 1500 mg/day raises the effective water requirement because
-    higher osmolarity requires more water to maintain plasma volume in
-    microgravity (reduced diuresis means sodium is retained longer).
+    When sweat_loss_L_per_day is supplied (from BioGears SweatRate output),
+    it is added to the effective water requirement so that high-intensity EVA
+    sweat loss is accounted for with a measured value rather than a Python estimate.
 
     Returns 1.0 when water intake equals or exceeds requirement; falls linearly
     to 0.0 at zero water intake.
     """
     sodium_excess      = max(0.0, sodium_mg_per_day - _SODIUM_REFERENCE_MG)
-    effective_need_L   = _WATER_NEED_BASE_L + sodium_excess * _SODIUM_WATER_COUPLING
+    effective_need_L   = (_WATER_NEED_BASE_L
+                          + sodium_excess * _SODIUM_WATER_COUPLING
+                          + sweat_loss_L_per_day)
     return float(np.clip(daily_water_L / effective_need_L, 0.0, 1.0))
 
 
