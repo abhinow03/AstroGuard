@@ -35,15 +35,31 @@ BG_RECOVERY_MIN      = 1.5  # minutes of BioGears recovery phase
 
 # ── Scenario XML generation ────────────────────────────────────────────────────
 
-def _generate_scenario_xml(eva_intensity: float) -> str:
+def _generate_scenario_xml(
+    eva_intensity: float,
+    patient_file:  str   = "StandardMale.xml",
+    carb_g:        float = 130.0,
+    fat_g:         float = 27.0,
+    protein_g:     float = 20.0,
+    sodium_g:      float = 1.0,
+    water_L:       float = 0.5,
+) -> str:
     """
-    Build the BioGears scenario XML string for a SHORT EVA capture run.
-    Duration is fixed (BG_EVA_DURATION_MIN / BG_RECOVERY_MIN) so the
-    Streamlit app doesn't wait more than ~3-4 minutes for BioGears.
+    Build the BioGears scenario XML for a SHORT EVA capture run.
+
+    Structure:
+      30 s  baseline stabilisation
+      ConsumeNutrientsData  ← pre-EVA meal (user-configured macros)
+      30 s  post-meal wait
+      BG_EVA_DURATION_MIN   exercise at eva_intensity
+      BG_RECOVERY_MIN       cooldown (intensity 0)
+
+    Total wall-clock run time: ~7.5 min (fast enough for live demo).
     """
-    baseline_s = 30                          # 30s warm-up (stabilisation is separate)
-    eva_s      = BG_EVA_DURATION_MIN * 60
-    rec_s      = BG_RECOVERY_MIN * 60
+    baseline_s   = 30
+    post_meal_s  = 30
+    eva_s        = int(BG_EVA_DURATION_MIN * 60)
+    rec_s        = int(BG_RECOVERY_MIN * 60)
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Scenario xmlns="uri:/mil/tatrc/physiology/datamodel"
@@ -53,10 +69,10 @@ def _generate_scenario_xml(eva_intensity: float) -> str:
   <Name>{SCENARIO_NAME}</Name>
   <Description>EVA Workload Simulation — Astronaut Fatigue Digital Twin</Description>
   <InitialParameters>
-    <PatientFile>StandardMale.xml</PatientFile>
+    <PatientFile>{patient_file}</PatientFile>
   </InitialParameters>
 
-  <!-- 1 sample/s keeps output manageable (~few thousand rows) -->
+  <!-- 1 sample/s keeps output manageable -->
   <DataRequests SamplesPerSecond="1">
     <DataRequest xsi:type="PhysiologyDataRequestData" Name="HeartRate"               Unit="1/min"    Precision="2"/>
     <DataRequest xsi:type="PhysiologyDataRequestData" Name="OxygenSaturation"        Unit="unitless" Precision="4"/>
@@ -79,7 +95,21 @@ def _generate_scenario_xml(eva_intensity: float) -> str:
       <Time value="{baseline_s}" unit="s"/>
     </Action>
 
-    <!-- Phase 2: EVA workload -->
+    <!-- Phase 2: pre-EVA meal — BioGears models metabolic response -->
+    <Action xsi:type="ConsumeNutrientsData">
+      <Nutrition>
+        <Carbohydrate value="{carb_g:.1f}" unit="g"/>
+        <Fat value="{fat_g:.1f}" unit="g"/>
+        <Protein value="{protein_g:.1f}" unit="g"/>
+        <Sodium value="{sodium_g:.3f}" unit="g"/>
+        <Water value="{water_L:.2f}" unit="L"/>
+      </Nutrition>
+    </Action>
+    <Action xsi:type="AdvanceTimeData">
+      <Time value="{post_meal_s}" unit="s"/>
+    </Action>
+
+    <!-- Phase 3: EVA workload -->
     <Action xsi:type="ExerciseData">
       <GenericExercise>
         <Intensity value="{eva_intensity:.3f}"/>
@@ -89,7 +119,7 @@ def _generate_scenario_xml(eva_intensity: float) -> str:
       <Time value="{eva_s}" unit="s"/>
     </Action>
 
-    <!-- Phase 3: recovery -->
+    <!-- Phase 4: recovery -->
     <Action xsi:type="ExerciseData">
       <GenericExercise>
         <Intensity value="0.0"/>
@@ -135,16 +165,21 @@ def _find_output_csv(before_mtime: float) -> Path | None:
 
 
 def run_biogears(
-    eva_intensity: float,
-    timeout: int = 600,
+    eva_intensity:  float,
+    patient_file:   str   = "StandardMale.xml",
+    carb_g:         float = 130.0,
+    fat_g:          float = 27.0,
+    protein_g:      float = 20.0,
+    sodium_g:       float = 1.0,
+    water_L:        float = 0.5,
+    timeout:        int   = 600,
     progress_callback=None,
 ) -> Tuple["pd.DataFrame | None", str]:
     """
-    Write EVA scenario XML → call bg-scenario.exe → parse output CSV.
+    Write patient + nutrition-specific EVA scenario XML → call bg-scenario.exe → parse CSV.
 
     Uses bg-scenario.exe (NOT bg-cli.exe — that crashes on this system).
-    Scenario duration is fixed short (BG_EVA_DURATION_MIN / BG_RECOVERY_MIN)
-    so the run completes in ~3-4 minutes.
+    Total scenario: ~7.5 min (baseline + pre-EVA meal + 5 min EVA + 1.5 min recovery).
 
     Returns (DataFrame | None, status_message).
     """
@@ -152,7 +187,9 @@ def run_biogears(
         return None, f"bg-scenario.exe not found at {BG_SCENARIO}"
 
     scenario_path = BIOGEARS_BIN / f"{SCENARIO_NAME}.xml"
-    xml = _generate_scenario_xml(eva_intensity)
+    xml = _generate_scenario_xml(eva_intensity, patient_file=patient_file,
+                                 carb_g=carb_g, fat_g=fat_g, protein_g=protein_g,
+                                 sodium_g=sodium_g, water_L=water_L)
     scenario_path.write_text(xml, encoding="utf-8")
 
     if progress_callback:
@@ -324,16 +361,13 @@ def _load_fallback(eva_intensity: float, eva_duration_min: float, recovery_min: 
 
 # ── Precomputed XML library ────────────────────────────────────────────────────
 #
-# BioGears runs are expensive (~3-4 minutes each). After a live run succeeds,
-# we serialise the resulting DataFrame to an XML file in precomputed/ so the
-# next session can load it instantly in CSV-mode without re-running the engine.
+# Cache key includes patient + intensity + nutrition so different astronauts
+# and meal configurations produce separate cached files.
 #
-# XML format follows the BioGears namespace convention used throughout the project
-# (uri:/mil/tatrc/physiology/datamodel) so the files are structurally consistent
-# with the scenario XML and mission log XML already produced by this codebase.
+# File naming: StandardMale_intensity_050_c130_p20.xml
+#              Male_22_Fit_Soldier_intensity_050_c130_p20.xml
 #
-# File naming: intensity_050.xml  →  EVA intensity 0.50
-#              intensity_070.xml  →  EVA intensity 0.70
+# Legacy files (intensity_050.xml) are still readable as a fallback.
 
 import xml.etree.ElementTree as ET
 
@@ -343,19 +377,35 @@ ET.register_namespace("",    _PC_NS)
 ET.register_namespace("xsi", _PC_XSI)
 
 
-def _save_precomputed_xml(df: pd.DataFrame, eva_intensity: float) -> Path:
+def _precomputed_key(
+    eva_intensity: float,
+    patient_file:  str,
+    carb_g:        float,
+    protein_g:     float,
+) -> str:
+    """Build a unique filename stem for a BioGears run with specific patient + nutrition."""
+    pname = Path(patient_file).stem
+    return (
+        f"{pname}_intensity_{int(round(eva_intensity * 100)):03d}"
+        f"_c{int(carb_g)}_p{int(protein_g)}"
+    )
+
+
+def _save_precomputed_xml(df: pd.DataFrame, eva_intensity: float,
+                          pc_key: str | None = None) -> Path:
     """
     Serialise a BioGears output DataFrame to an XML file in precomputed/.
 
-    Each column becomes a <Signal> element with a name attribute; each row
-    becomes a <Sample> element whose value is the floating-point measurement
-    at that time step. The Time_s column is written as <Time> elements on
-    the parent <Sample> for easy human inspection.
+    `pc_key` is the filename stem (from _precomputed_key). Falls back to the
+    legacy intensity-only naming when not provided.
 
     Returns the path of the written file.
     """
     PRECOMPUTED_DIR.mkdir(exist_ok=True)
-    fname = f"intensity_{int(round(eva_intensity * 100)):03d}.xml"
+    if pc_key:
+        fname = f"{pc_key}.xml"
+    else:
+        fname = f"intensity_{int(round(eva_intensity * 100)):03d}.xml"
     out   = PRECOMPUTED_DIR / fname
 
     root = ET.Element(f"{{{_PC_NS}}}BiogearsCaptureData", {
@@ -440,41 +490,57 @@ def _load_precomputed_xml(xml_path: Path) -> "pd.DataFrame | None":
         return None
 
 
-def _load_precomputed(eva_intensity: float) -> Tuple["pd.DataFrame | None", str]:
+def _load_precomputed(eva_intensity: float,
+                      pc_key: str | None = None) -> Tuple["pd.DataFrame | None", str]:
     """
-    Load the nearest precomputed XML, blending two adjacent intensities if needed.
+    Load a precomputed BioGears XML.
 
-    Files are named intensity_050.xml (= 0.50), intensity_070.xml (= 0.70), etc.
-    Blending: linear interpolation column-by-column between the two bounding files.
-    Falls back to legacy .csv files if no XML files are found (migration path).
+    Priority:
+      1. Exact match by pc_key (patient + intensity + nutrition)
+      2. Fallback to legacy intensity-only naming (intensity_050.xml)
+      3. Fallback to CSV (migration path from older sessions)
+
+    For the legacy intensity-only path, blends between two adjacent files when
+    the requested intensity falls between two cached values.
     """
     if not PRECOMPUTED_DIR.exists():
         return None, "precomputed/ directory not found"
 
+    # 1. Exact patient+nutrition match
+    if pc_key:
+        exact = PRECOMPUTED_DIR / f"{pc_key}.xml"
+        if exact.exists():
+            df = _load_precomputed_xml(exact)
+            if df is not None and len(df) > 20:
+                return df, f"Precomputed XML (exact) {pc_key}"
+
+    # 2. Legacy intensity-only XML files
     xmls = sorted(PRECOMPUTED_DIR.glob("intensity_*.xml"))
     if not xmls:
-        # Legacy CSV fallback — migrate old sessions that only have CSV files
         csvs = sorted(PRECOMPUTED_DIR.glob("intensity_*.csv"))
         if not csvs:
             return None, "No precomputed files — run Live BioGears at least once"
         xmls_or_csvs = csvs
-        loader = _parse_csv
+        loader    = _parse_csv
         ext_label = "CSV (legacy)"
     else:
         xmls_or_csvs = xmls
-        loader = _load_precomputed_xml
-        ext_label = "XML"
+        loader    = _load_precomputed_xml
+        ext_label = "XML (legacy)"
 
     available: dict[float, Path] = {}
     for p in xmls_or_csvs:
         try:
-            val = int(p.stem.split("_")[1]) / 100.0
-            available[val] = p
+            # Legacy files: intensity_050.xml → stem has exactly 2 underscore parts
+            parts = p.stem.split("_")
+            if len(parts) == 2:
+                val = int(parts[1]) / 100.0
+                available[val] = p
         except (IndexError, ValueError):
             continue
 
     if not available:
-        return None, "Could not parse precomputed filenames"
+        return None, "No legacy precomputed files found"
 
     keys = sorted(available)
 
@@ -509,10 +575,16 @@ def _load_precomputed(eva_intensity: float) -> Tuple["pd.DataFrame | None", str]
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def get_biogears_segment(
-    eva_intensity: float,
+    eva_intensity:  float,
     eva_duration_min: float,
-    recovery_min: float,
-    mode: str = "live",
+    recovery_min:   float,
+    patient_file:   str   = "StandardMale.xml",
+    carb_g:         float = 130.0,
+    fat_g:          float = 27.0,
+    protein_g:      float = 20.0,
+    sodium_g:       float = 1.0,
+    water_L:        float = 0.5,
+    mode:           str   = "live",
     progress_callback=None,
 ) -> Tuple[pd.DataFrame, bool, str]:
     """
@@ -520,28 +592,83 @@ def get_biogears_segment(
 
     mode="csv"  — instant: loads from precomputed/ library, blending if needed.
                   Falls back to synth if no precomputed files exist.
-    mode="live" — runs bg-scenario.exe, saves result to precomputed/ on success,
-                  falls back to synth if BioGears is unavailable.
+    mode="live" — runs bg-scenario.exe with the selected patient + nutrition,
+                  saves result to precomputed/ on success, falls back to synth if unavailable.
 
     Returns: (df, used_real_biogears, status_message)
     """
+    pc_key = _precomputed_key(eva_intensity, patient_file, carb_g, protein_g)
+
     if mode == "csv":
-        df, msg = _load_precomputed(eva_intensity)
+        df, msg = _load_precomputed(eva_intensity, pc_key)
         if df is not None and len(df) > 20:
             return df, True, f"CSV MODE · {msg}"
-        # No precomputed files yet — fall through to synth
         fallback_df = _load_fallback(eva_intensity, BG_EVA_DURATION_MIN, BG_RECOVERY_MIN)
         return fallback_df, False, f"CSV MODE · {msg} — using synth fallback"
 
     # Live mode
-    df, msg = run_biogears(eva_intensity, progress_callback=progress_callback)
+    df, msg = run_biogears(eva_intensity, patient_file=patient_file,
+                           carb_g=carb_g, fat_g=fat_g, protein_g=protein_g,
+                           sodium_g=sodium_g, water_L=water_L,
+                           progress_callback=progress_callback)
     if df is not None and len(df) > 20:
-        _save_precomputed_xml(df, eva_intensity)   # cache for future XML-mode use
+        _save_precomputed_xml(df, eva_intensity, pc_key)   # cache with patient+nutrition key
         return df, True, msg
 
     fallback_df = _load_fallback(eva_intensity, BG_EVA_DURATION_MIN, BG_RECOVERY_MIN)
     fallback_msg = f"BioGears unavailable — using synthesised signals. ({msg})"
     return fallback_df, False, fallback_msg
+
+
+def extract_biogears_calibration(df: pd.DataFrame, baseline_s: float = 30.0) -> dict:
+    """
+    Extract patient + nutrition-specific physiological rates from a BioGears run.
+
+    The EVA phase starts after the baseline (30 s) + post-meal wait (30 s) = 60 s.
+    All rates are per-minute, matching fatigue.py's 1-minute simulation tick.
+
+    Returns
+    -------
+    eva_fatigue_rate_per_min      : BioGears FatigueLevel slope during EVA (0.008 fallback)
+    glycogen_start_g              : MuscleGlycogen at EVA start
+    glycogen_depletion_g_per_min  : MuscleGlycogen depletion rate during EVA (2.8 fallback)
+    sweat_rate_mg_per_min         : mean SweatRate during EVA (600 mg/min fallback ≈ 0.6 L/h)
+    """
+    # EVA starts after baseline (30 s) + post-meal wait (30 s)
+    eva_start_s = baseline_s + 30.0
+    eva_df = df[df["Time_s"] > eva_start_s].copy()
+
+    cal: dict = {}
+
+    # ── BioGears FatigueLevel slope ──────────────────────────────────────────
+    if "FatigueLevel" in df.columns and len(eva_df) > 5:
+        fv = eva_df["FatigueLevel"].values.astype(float)
+        duration_min = len(fv) / 60.0
+        cal["eva_fatigue_rate_per_min"] = float(
+            max(0.0, fv[-1] - fv[0]) / max(duration_min, 0.1)
+        )
+    else:
+        cal["eva_fatigue_rate_per_min"] = 0.008
+
+    # ── MuscleGlycogen depletion ─────────────────────────────────────────────
+    if "MuscleGlycogen" in df.columns and len(eva_df) > 5:
+        gv = eva_df["MuscleGlycogen"].values.astype(float)
+        duration_min = len(gv) / 60.0
+        cal["glycogen_start_g"] = float(gv[0])
+        cal["glycogen_depletion_g_per_min"] = float(
+            max(0.0, gv[0] - gv[-1]) / max(duration_min, 0.1)
+        )
+    else:
+        cal["glycogen_start_g"] = 350.0
+        cal["glycogen_depletion_g_per_min"] = 2.8
+
+    # ── SweatRate ────────────────────────────────────────────────────────────
+    if "SweatRate" in df.columns and len(eva_df) > 5:
+        cal["sweat_rate_mg_per_min"] = float(eva_df["SweatRate"].mean())
+    else:
+        cal["sweat_rate_mg_per_min"] = 600.0
+
+    return cal
 
 
 def extract_segment_stats(df: pd.DataFrame, baseline_s: float = 30.0) -> dict:
