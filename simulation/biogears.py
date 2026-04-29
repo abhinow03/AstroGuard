@@ -26,11 +26,11 @@ SCENARIO_NAME   = "EVA_Mission_Scenario"
 FALLBACK_CSV    = Path(__file__).parent.parent / "CardiovascularValidationResults.csv"
 PRECOMPUTED_DIR = Path(__file__).parent.parent / "precomputed"
 
-# BioGears scenario is intentionally SHORT (10 min EVA, 5 min recovery).
-# The physiological SHAPE is captured here and then resampled to fill the
-# full mission EVA duration in health_vars.py.
-BG_EVA_DURATION_MIN  = 10   # minutes of BioGears exercise phase
-BG_RECOVERY_MIN      = 5    # minutes of BioGears recovery phase
+# BioGears scenario is intentionally SHORT for live demo (< 10 min total).
+# The physiological SHAPE + calibration rates are captured here and then
+# resampled/extended to fill the full mission duration in health_vars.py.
+BG_EVA_DURATION_MIN  = 5    # minutes of BioGears exercise phase
+BG_RECOVERY_MIN      = 1.5  # minutes of BioGears recovery phase
 
 
 # ── Scenario XML generation ────────────────────────────────────────────────────
