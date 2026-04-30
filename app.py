@@ -789,7 +789,6 @@ for _row in _rows:
             if st.button("SELECT", key=f"sel_{pname}", use_container_width=True):
                 st.session_state["selected_patient_name"] = pname
                 st.session_state["show_patient_dialog"]   = True
-                st.rerun()
 
 
 # ── Compact selected-astronaut bar ────────────────────────────────────────────
@@ -835,7 +834,6 @@ with bar_col:
 with btn_col:
     if st.button("RECONFIGURE", use_container_width=True):
         st.session_state["show_patient_dialog"] = True
-        st.rerun()
 
 st.divider()
 
@@ -848,8 +846,8 @@ if run_btn:
         # Pass selected patient XML + pre-EVA meal macros so BioGears runs with
         # the correct patient physiology and models the metabolic response to nutrition.
         _patient_file = f"{sel_name}.xml"
-        _fat_g        = ss.get("cfg_fat_g", 27.0)
-        _sodium_g     = ss.get("cfg_sodium_mg", 1000.0) / 1000.0   # mg → g for BioGears
+        _fat_g        = st.session_state.get("cfg_fat_g", 27.0)
+        _sodium_g     = st.session_state.get("cfg_sodium_mg", 1000.0) / 1000.0   # mg → g for BioGears
         biogears_df, used_real, bg_msg = cached_biogears(
             eva_intensity, eva_duration_min, recovery_min,
             patient_file=_patient_file,
@@ -857,7 +855,7 @@ if run_btn:
             fat_g=_fat_g,
             protein_g=protein_g_per_meal,
             sodium_g=_sodium_g,
-            water_L=ss.get("cfg_water_L", 2.0) / 3.0,   # daily → per-meal estimate
+            water_L=st.session_state.get("cfg_water_L", 2.0) / 3.0,   # daily → per-meal estimate
             mode=bg_mode,
         )
         bg_elapsed = time.time() - t0
