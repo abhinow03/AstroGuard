@@ -1451,101 +1451,156 @@ with tab4:
 
 # ── Standalone Fatigue Calculator ─────────────────────────────────────────────
 st.divider()
-st.markdown('<div class="hud-section">// FATIGUE CALCULATOR — instant, no simulation needed</div>',
+st.markdown('<div class="hud-section">// FATIGUE CALCULATOR — instant equation demo</div>',
             unsafe_allow_html=True)
 
 with st.expander("Open Fatigue Calculator", expanded=False):
+    import numpy as _np
     from simulation.fatigue import (
         _hydration_state, _hydration_penalty, _sleep_debt_penalty,
         _protein_recovery_factor, _glycogen_init,
-        _RATE_EVA_ACCUMULATE, _RATE_SLEEP_RECOVER, _RATE_PASSIVE_RECOVER,
-        _GLY_DEPLETION_PER_MIN,
+        _RATE_EVA_ACCUMULATE, _RATE_SLEEP_RECOVER,
     )
 
-    fc_c1, fc_c2, fc_c3 = st.columns(3)
+    # ── Inputs ────────────────────────────────────────────────────────────────
+    st.markdown("#### Inputs")
+    in_c1, in_c2, in_c3 = st.columns(3)
 
-    with fc_c1:
-        st.markdown("**Patient**")
-        fc_patient_name = st.selectbox("Select Patient", PATIENT_NAMES, key="fc_patient")
+    with in_c1:
+        st.markdown("**Patient & Mission**")
+        fc_patient_name = st.selectbox("Patient", PATIENT_NAMES, key="fc_patient")
         fc_p   = ALL_PATIENTS[fc_patient_name]
         fc_day = st.slider("Days in Space", 0, 180, 1, 1, key="fc_day")
         fc_mg  = microgravity_factors(fc_day)
-        fc_adj = fc_mg.adjust_patient(fc_p)
-        st.caption(f"VO2max: {fc_p.vo2max_ml_kg_min:.1f} → {fc_p.vo2max_ml_kg_min * fc_mg.vo2max_factor:.1f} mL/kg/min")
-        st.caption(f"HR baseline: {fc_p.hr_baseline:.0f} → {fc_p.hr_baseline + fc_mg.hr_offset:.0f} bpm (microgravity)")
-        st.caption(f"Fitness tier: {fc_p.fitness_tier}")
+        fc_intensity = st.slider("EVA Intensity", 0.10, 0.90, 0.40, 0.05, key="fc_intensity")
+        fc_eva_dur   = st.slider("EVA Duration (min)", 10, 240, 60, 10, key="fc_eva_dur")
 
-        st.markdown("**EVA**")
-        fc_intensity  = st.slider("EVA Intensity", 0.10, 0.90, 0.50, 0.05, key="fc_intensity")
-        fc_eva_dur    = st.slider("EVA Duration (min)", 10, 240, 90, 10, key="fc_eva_dur")
-
-    with fc_c2:
+    with in_c2:
         st.markdown("**Nutrition**")
-        fc_carb    = st.slider("Carbs / meal (g)",    30,  300, 130, 5,  key="fc_carb")
-        fc_protein = st.slider("Protein / meal (g)",   5,   80,  20, 5,  key="fc_prot")
-        fc_meals   = st.slider("Meals / day",           1,    5,   3, 1,  key="fc_meals")
-        fc_water   = st.slider("Daily water (L)",     0.5,  5.0, 2.0, 0.1, key="fc_water")
-        fc_sodium  = st.slider("Sodium / day (mg)",   500, 3500, 1500, 100, key="fc_sodium")
-        fc_sleep   = st.slider("Sleep (h/night)",     4.0,  9.0, 8.0, 0.5, key="fc_sleep")
+        fc_carb    = st.slider("Carbs / meal (g)",   30,  300, 130,  5, key="fc_carb")
+        fc_protein = st.slider("Protein / meal (g)",  5,   80,  20,  5, key="fc_prot")
+        fc_meals   = st.slider("Meals / day",          1,    5,   3,  1, key="fc_meals")
+        fc_water   = st.slider("Daily water (L)",    0.5,  5.0, 2.5, 0.1, key="fc_water")
+        fc_sodium  = st.slider("Sodium / day (mg)", 500, 3500,1200, 100, key="fc_sodium")
 
-    with fc_c3:
-        st.markdown("**Computed Scalars**")
+    with in_c3:
+        st.markdown("**Recovery**")
+        fc_sleep = st.slider("Sleep (h/night)", 4.0, 9.0, 8.0, 0.5, key="fc_sleep")
 
-        fc_gly_max   = _glycogen_init(fc_p.lean_mass_kg, fc_mg.glycogen_factor)
-        fc_gly_start = fc_gly_max * 0.80
-        fc_hyd       = _hydration_state(fc_water, fc_sodium)
-        fc_hyd_pen   = _hydration_penalty(fc_hyd)
-        fc_slp_pen   = _sleep_debt_penalty(fc_sleep, fc_day)
-        fc_prot_rec  = _protein_recovery_factor(fc_protein, fc_meals, fc_p.weight_kg)
-        fc_vo2       = fc_mg.vo2max_factor
+    st.divider()
 
-        fc_gly_frac  = 0.80
-        fc_gly_pen   = 1.0 + 0.60 * (1.0 - fc_gly_frac)
+    # ── Calculations ─────────────────────────────────────────────────────────
+    # Patient-derived values
+    fc_vo2_factor  = fc_mg.vo2max_factor
+    fc_hr_base_mg  = fc_p.hr_baseline + fc_mg.hr_offset   # HR at rest in microgravity
+    fc_hr_max      = fc_p.hr_max
+    fc_gly_max     = _glycogen_init(fc_p.lean_mass_kg, fc_mg.glycogen_factor)
+    fc_gly_start_g = fc_gly_max * 0.80
+    fc_gly_frac    = 0.80
 
-        fc_eva_rate  = (_RATE_EVA_ACCUMULATE
-                        * (1.0 / max(fc_vo2, 0.01))
-                        * fc_hyd_pen
-                        * fc_gly_pen
-                        * fc_slp_pen)
+    # HR_norm: EVA intensity drives HR linearly from baseline to max
+    # HR during EVA ≈ baseline_mg + intensity × (hr_max - baseline_mg)
+    fc_hr_eva      = fc_hr_base_mg + fc_intensity * (fc_hr_max - fc_hr_base_mg)
+    fc_hr_norm     = float(_np.clip(
+        (fc_hr_eva - fc_hr_base_mg) / max(fc_hr_max - fc_hr_base_mg, 1.0), 0.0, 1.0))
 
-        fc_slp_rate  = _RATE_SLEEP_RECOVER * fc_vo2 * fc_prot_rec * (fc_sleep / 8.0)
+    # Penalties
+    fc_hyd         = _hydration_state(fc_water, fc_sodium)
+    fc_hyd_pen     = _hydration_penalty(fc_hyd)
+    fc_slp_pen     = _sleep_debt_penalty(fc_sleep, fc_day)
+    fc_prot_rec    = _protein_recovery_factor(fc_protein, fc_meals, fc_p.weight_kg)
+    fc_gly_pen     = 1.0 + 0.60 * (1.0 - fc_gly_frac)
 
-        # Simple fatigue estimate: EVA phase only, no recovery
-        fc_peak_fatigue = min(1.0, fc_eva_rate * fc_eva_dur)
-        fc_status = "SAFE" if fc_peak_fatigue < 0.60 else ("MONITOR" if fc_peak_fatigue < 0.80 else "ABORT")
-        fc_status_color = "#00ff88" if fc_status == "SAFE" else ("#ffaa00" if fc_status == "MONITOR" else "#ff1a3c")
+    # Per-minute rates
+    fc_eva_rate    = (_RATE_EVA_ACCUMULATE
+                      * (fc_hr_norm / max(fc_vo2_factor, 0.01))
+                      * fc_hyd_pen * fc_gly_pen * fc_slp_pen)
+    fc_slp_rate    = _RATE_SLEEP_RECOVER * fc_vo2_factor * fc_prot_rec * (fc_sleep / 8.0)
 
+    # Peak fatigue estimate
+    fc_peak        = float(_np.clip(fc_eva_rate * fc_eva_dur, 0.0, 1.0))
+    fc_status      = "SAFE" if fc_peak < 0.60 else ("MONITOR" if fc_peak < 0.80 else "ABORT")
+    fc_col         = "#00ff88" if fc_status == "SAFE" else ("#ffaa00" if fc_status == "MONITOR" else "#ff1a3c")
+
+    # ── Display ───────────────────────────────────────────────────────────────
+    st.markdown("#### Fatigue Equation & Results")
+    eq_c1, eq_c2 = st.columns([3, 2])
+
+    with eq_c1:
         st.markdown(f"""
-<div style="font-family:var(--mono);font-size:0.62rem;line-height:2.0">
-  <div style="color:var(--hud-muted)">VO2max factor</div>
-  <div style="color:var(--hud-text)">x{fc_vo2:.3f} &nbsp;({fc_p.vo2max_ml_kg_min:.1f} → {fc_p.vo2max_ml_kg_min*fc_vo2:.1f} mL/kg/min)</div>
+<div style="font-family:var(--mono);font-size:0.62rem;line-height:1.85;
+            background:var(--hud-surface);padding:1rem;border:1px solid var(--hud-border)">
 
-  <div style="color:var(--hud-muted);margin-top:0.3rem">Hydration state</div>
-  <div style="color:{'var(--hud-green)' if fc_hyd > 0.9 else 'var(--hud-amber)'}">
-    {fc_hyd:.3f} → penalty x{fc_hyd_pen:.3f} &nbsp;(+{(fc_hyd_pen-1)*100:.1f}%)</div>
+  <div style="color:var(--hud-cyan);letter-spacing:0.15em;margin-bottom:0.6rem">
+    FATIGUE EQUATION (per EVA minute)
+  </div>
 
-  <div style="color:var(--hud-muted);margin-top:0.3rem">Sleep debt penalty</div>
-  <div style="color:{'var(--hud-green)' if fc_slp_pen < 1.05 else 'var(--hud-red)' if fc_slp_pen > 1.20 else 'var(--hud-amber)'}">
-    x{fc_slp_pen:.3f} &nbsp;(+{(fc_slp_pen-1)*100:.1f}%)</div>
+  <div style="color:var(--hud-muted)">Δ fatigue =</div>
+  <div style="color:var(--hud-text);margin-left:1rem">
+    R_base &times; (HR_norm / VO2_factor) &times; Hyd_penalty &times; Gly_penalty &times; Sleep_penalty
+  </div>
 
-  <div style="color:var(--hud-muted);margin-top:0.3rem">Protein recovery</div>
-  <div style="color:{'var(--hud-green)' if fc_prot_rec > 0.90 else 'var(--hud-amber)'}">
-    x{fc_prot_rec:.3f} &nbsp;({fc_protein*fc_meals:.0f}g/day vs {1.6*fc_p.weight_kg:.0f}g target)</div>
+  <div style="margin:0.8rem 0;border-top:1px solid var(--hud-border)"></div>
 
-  <div style="color:var(--hud-muted);margin-top:0.3rem">Glycogen penalty (80% start)</div>
-  <div style="color:var(--hud-text)">x{fc_gly_pen:.3f}</div>
+  <div style="color:var(--hud-muted)">Substituting your values:</div>
+  <div style="color:var(--hud-text);margin-left:1rem;margin-top:0.3rem">
+    <span style="color:var(--hud-amber)">{_RATE_EVA_ACCUMULATE}</span>
+    &times; (<span style="color:var(--hud-amber)">{fc_hr_norm:.3f}</span> / <span style="color:var(--hud-amber)">{fc_vo2_factor:.3f}</span>)
+    &times; <span style="color:{'var(--hud-green)' if fc_hyd_pen < 1.05 else 'var(--hud-red)'}">{fc_hyd_pen:.3f}</span>
+    &times; <span style="color:var(--hud-amber)">{fc_gly_pen:.3f}</span>
+    &times; <span style="color:{'var(--hud-green)' if fc_slp_pen < 1.05 else 'var(--hud-red)'}">{fc_slp_pen:.3f}</span>
+  </div>
+  <div style="color:var(--hud-orange);font-size:0.75rem;margin-left:1rem;margin-top:0.3rem">
+    = <b>{fc_eva_rate:.6f} / min</b>
+  </div>
 
-  <div style="color:var(--hud-muted);margin-top:0.3rem">EVA fatigue rate</div>
-  <div style="color:var(--hud-orange)">+{fc_eva_rate:.5f} / min</div>
+  <div style="margin:0.8rem 0;border-top:1px solid var(--hud-border)"></div>
 
-  <div style="color:var(--hud-muted);margin-top:0.3rem">Sleep recovery rate</div>
-  <div style="color:var(--hud-green)">-{fc_slp_rate:.5f} / min</div>
+  <div style="color:var(--hud-muted)">Where:</div>
+  <div style="margin-left:1rem">
+    <div><span style="color:var(--hud-dim)">R_base</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= {_RATE_EVA_ACCUMULATE} &nbsp;(base accumulation constant)</div>
+    <div><span style="color:var(--hud-dim)">HR_norm</span> &nbsp;&nbsp;&nbsp;= {fc_hr_norm:.3f} &nbsp;(HR {fc_hr_eva:.0f} bpm, range {fc_hr_base_mg:.0f}–{fc_hr_max:.0f})</div>
+    <div><span style="color:var(--hud-dim)">VO2_factor</span> = {fc_vo2_factor:.3f} &nbsp;(day {fc_day} deconditioning: {fc_p.vo2max_ml_kg_min:.1f}→{fc_p.vo2max_ml_kg_min*fc_vo2_factor:.1f} mL/kg/min)</div>
+    <div><span style="color:var(--hud-dim)">Hyd_penalty</span>= {fc_hyd_pen:.3f} &nbsp;({fc_water:.1f}L water, {fc_sodium:.0f}mg sodium → hydration {fc_hyd:.3f})</div>
+    <div><span style="color:var(--hud-dim)">Gly_penalty</span>= {fc_gly_pen:.3f} &nbsp;(glycogen {fc_gly_frac*100:.0f}% → +{(fc_gly_pen-1)*100:.0f}% harder)</div>
+    <div><span style="color:var(--hud-dim)">Sleep_pen</span> &nbsp;= {fc_slp_pen:.3f} &nbsp;({fc_sleep:.1f}h sleep → +{(fc_slp_pen-1)*100:.1f}% EVA fatigue)</div>
+  </div>
 
-  <div style="margin-top:0.8rem;padding:0.6rem;background:var(--hud-surface);
-              border:1px solid {fc_status_color}44">
-    <div style="color:var(--hud-muted);font-size:0.55rem">ESTIMATED PEAK FATIGUE ({fc_eva_dur} min EVA)</div>
-    <div style="font-size:1.4rem;color:{fc_status_color}">{fc_peak_fatigue:.3f}</div>
-    <div style="color:{fc_status_color};font-size:0.7rem;letter-spacing:0.15em">{fc_status}</div>
+  <div style="margin:0.8rem 0;border-top:1px solid var(--hud-border)"></div>
+  <div style="color:var(--hud-muted)">Recovery (sleep phase):</div>
+  <div style="color:var(--hud-green);margin-left:1rem">
+    -{fc_slp_rate:.6f} / min &nbsp;(protein adequacy {fc_prot_rec:.2f} &times; VO2 {fc_vo2_factor:.3f} &times; {fc_sleep:.1f}/8h sleep)
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    with eq_c2:
+        st.markdown(f"""
+<div style="font-family:var(--mono);font-size:0.65rem;line-height:2.0;
+            background:var(--hud-surface);padding:1rem;border:1px solid {fc_col}55;height:100%">
+
+  <div style="color:var(--hud-cyan);letter-spacing:0.15em;margin-bottom:0.8rem">RESULT</div>
+
+  <div style="color:var(--hud-muted)">Patient</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{fc_p.display_name}</div>
+
+  <div style="color:var(--hud-muted)">Fitness tier</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{fc_p.fitness_tier}</div>
+
+  <div style="color:var(--hud-muted)">EVA rate</div>
+  <div style="color:var(--hud-orange);margin-bottom:0.4rem">+{fc_eva_rate:.5f} / min</div>
+
+  <div style="color:var(--hud-muted)">Duration</div>
+  <div style="color:var(--hud-text);margin-bottom:0.8rem">{fc_eva_dur} min @ intensity {fc_intensity:.2f}</div>
+
+  <div style="border-top:1px solid {fc_col}55;padding-top:0.8rem">
+    <div style="color:var(--hud-muted);font-size:0.55rem;letter-spacing:0.15em">PEAK FATIGUE INDEX</div>
+    <div style="font-size:2.5rem;color:{fc_col};line-height:1.1">{fc_peak:.3f}</div>
+    <div style="color:{fc_col};font-size:0.9rem;letter-spacing:0.2em;margin-top:0.2rem">{fc_status}</div>
+  </div>
+
+  <div style="margin-top:0.8rem;font-size:0.55rem;color:var(--hud-muted)">
+    = {fc_eva_rate:.5f} &times; {fc_eva_dur} min
   </div>
 </div>
 """, unsafe_allow_html=True)
