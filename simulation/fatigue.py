@@ -103,15 +103,23 @@ def compute_fatigue(
 
     # ── BioGears-calibrated rates (override defaults when available) ──────────
     if bg_calibration:
-        rate_eva      = float(bg_calibration.get("eva_fatigue_rate_per_min",
-                                                  _RATE_EVA_ACCUMULATE))
+        # BioGears FatigueLevel slope is intentionally NOT used as rate_eva.
+        # Its 5-minute slope (~0.05-0.10/min) is 6-12x steeper than a sustainable
+        # 24-hour mission rate because BioGears ramps fatigue rapidly in the initial
+        # transient. Using it directly would peg fatigue to 1.0 within 13 minutes.
+        # Instead we keep the physiologically calibrated base rate and let
+        # patient VO2max + glycogen + hydration drive the patient-specific differences.
+        rate_eva      = _RATE_EVA_ACCUMULATE
+
+        # Glycogen: BioGears MuscleGlycogen is in grams — right units, use directly.
         gly_depl_rate = float(bg_calibration.get("glycogen_depletion_g_per_min",
                                                   _GLY_DEPLETION_PER_MIN))
         glycogen_g    = float(bg_calibration.get("glycogen_start_g",
                                                   glycogen_max * 0.80))
-        # Actual sweat-adjusted hydration: if we lose more water than we drink, deficit worsens
+
+        # Sweat: BioGears SweatRate in mg/min — use to adjust hydration deficit.
         sweat_mg_min  = float(bg_calibration.get("sweat_rate_mg_per_min", 600.0))
-        sweat_L_day   = sweat_mg_min * 60 * 24 / 1e6   # mg/min → L/day (full-day equivalent)
+        sweat_L_day   = sweat_mg_min * 60 * 24 / 1e6   # mg/min → L/day equivalent
         hyd           = _hydration_state(daily_water_L, sodium_mg_per_day,
                                          sweat_loss_L_per_day=sweat_L_day)
     else:

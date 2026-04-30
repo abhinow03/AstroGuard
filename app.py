@@ -1242,11 +1242,7 @@ with st.expander("// FATIGUE EQUATION BREAKDOWN  —  inputs & computed scalars"
 """, unsafe_allow_html=True)
 
     with eq_c3:
-        _rate_source = (
-            f'<span style="color:var(--hud-cyan)">[BioGears FatigueLevel slope]</span>'
-            if _bg_eva_rate else
-            '[hardcoded default]'
-        )
+        _rate_source = '[calibrated base — patient VO2max + glycogen + hydration]'
         st.markdown(f"""
 <div style="font-family:var(--mono);font-size:0.6rem;line-height:1.9">
   <div style="color:var(--hud-cyan);text-transform:uppercase;letter-spacing:0.18em;
