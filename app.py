@@ -562,6 +562,41 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.divider()
 
+    # ── Demo presets ──────────────────────────────────────────────────────────
+    st.markdown('<div class="sb-group">Demo Presets</div>', unsafe_allow_html=True)
+    col_lo, col_hi = st.columns(2)
+    with col_lo:
+        if st.button("LOW RISK", use_container_width=True, help="Ideal astronaut + optimal nutrition"):
+            st.session_state.update({
+                "selected_patient_name": "Female_18_Normal",
+                "cfg_carb_g":    130.0,
+                "cfg_protein_g":  30.0,
+                "cfg_meals":       3.0,
+                "cfg_water_L":     3.0,
+                "cfg_sodium_mg":1000.0,
+                "cfg_sleep_h":     8.0,
+                "preset_eva_intensity":   0.30,
+                "preset_eva_duration":    60,
+                "preset_mission_day":      1,
+                "preset_mission_hours":   24,
+            })
+    with col_hi:
+        if st.button("HIGH RISK", use_container_width=True, help="Deconditioned patient + poor nutrition"):
+            st.session_state.update({
+                "selected_patient_name": "Male_44_Tachycardic",
+                "cfg_carb_g":     60.0,
+                "cfg_protein_g":  10.0,
+                "cfg_meals":       2.0,
+                "cfg_water_L":     1.5,
+                "cfg_sodium_mg": 2500.0,
+                "cfg_sleep_h":     5.0,
+                "preset_eva_intensity":   0.75,
+                "preset_eva_duration":   120,
+                "preset_mission_day":     60,
+                "preset_mission_hours":   48,
+            })
+    st.divider()
+
     st.markdown('<div class="sb-group">BioGears Source</div>', unsafe_allow_html=True)
     bg_mode_label = st.radio(
         "Mode", options=["CSV (instant)", "Live BioGears"],
@@ -572,17 +607,22 @@ with st.sidebar:
     st.divider()
 
     st.markdown('<div class="sb-group">EVA Parameters</div>', unsafe_allow_html=True)
-    eva_intensity = st.slider("EVA Intensity", 0.10, 0.90, 0.50, 0.05,
+    eva_intensity = st.slider("EVA Intensity", 0.10, 0.90,
+        float(st.session_state.pop("preset_eva_intensity", 0.50)), 0.05,
         help="Workload fraction sent to BioGears (0 = rest, 1 = max exertion)")
-    eva_duration_min = st.slider("Mission Duration (min)", 20, 240, 90, 10,
+    eva_duration_min = st.slider("Mission Duration (min)", 20, 240,
+        int(st.session_state.pop("preset_eva_duration", 90)), 10,
         help="Duration of the EVA exercise phase")
     recovery_min = st.slider("Recovery Time (min)", 10, 90, 30, 5,
         help="Post-EVA recovery phase duration")
     st.divider()
 
     st.markdown('<div class="sb-group">Mission Settings</div>', unsafe_allow_html=True)
-    mission_hours = st.select_slider("Mission Length", options=[24, 48, 72], value=48)
-    mission_day   = st.slider("Days in Space", 0, 180, 0, 1,
+    _preset_mh = st.session_state.pop("preset_mission_hours", 48)
+    mission_hours = st.select_slider("Mission Length", options=[24, 48, 72],
+        value=_preset_mh if _preset_mh in [24, 48, 72] else 48)
+    mission_day   = st.slider("Days in Space", 0, 180,
+        int(st.session_state.pop("preset_mission_day", 0)), 1,
         help="Days in microgravity before this EVA — drives cardiovascular deconditioning")
     st.divider()
 
