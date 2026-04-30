@@ -25,6 +25,7 @@ RUNS_DIR        = BIOGEARS_BIN / "runs"
 SCENARIO_NAME   = "EVA_Mission_Scenario"
 FALLBACK_CSV    = Path(__file__).parent.parent / "CardiovascularValidationResults.csv"
 PRECOMPUTED_DIR = Path(__file__).parent.parent / "precomputed"
+EVA_XML_DIR     = Path(__file__).parent.parent / "eva_xml"   # scenario XMLs saved here
 
 # BioGears scenario is intentionally SHORT for live demo (< 10 min total).
 # The physiological SHAPE + calibration rates are captured here and then
@@ -186,10 +187,19 @@ def run_biogears(
     if not BG_SCENARIO.exists():
         return None, f"bg-scenario.exe not found at {BG_SCENARIO}"
 
-    scenario_path = BIOGEARS_BIN / f"{SCENARIO_NAME}.xml"
+    EVA_XML_DIR.mkdir(exist_ok=True)
+    # Save a timestamped copy in the project's eva_xml/ folder for inspection
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    patient_stem = Path(patient_file).stem
+    archive_path = EVA_XML_DIR / f"{patient_stem}_{ts}.xml"
+
     xml = _generate_scenario_xml(eva_intensity, patient_file=patient_file,
                                  carb_g=carb_g, fat_g=fat_g, protein_g=protein_g,
                                  sodium_g=sodium_g, water_L=water_L)
+
+    # Write to project folder (record) and to BioGears bin (execution)
+    archive_path.write_text(xml, encoding="utf-8")
+    scenario_path = BIOGEARS_BIN / f"{SCENARIO_NAME}.xml"
     scenario_path.write_text(xml, encoding="utf-8")
 
     if progress_callback:
