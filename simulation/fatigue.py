@@ -103,17 +103,20 @@ def compute_fatigue(
 
     # ── BioGears-calibrated rates (override defaults when available) ──────────
     if bg_calibration:
-        # BioGears FatigueLevel slope is intentionally NOT used as rate_eva.
-        # Its 5-minute slope (~0.05-0.10/min) is 6-12x steeper than a sustainable
-        # 24-hour mission rate because BioGears ramps fatigue rapidly in the initial
-        # transient. Using it directly would peg fatigue to 1.0 within 13 minutes.
-        # Instead we keep the physiologically calibrated base rate and let
-        # patient VO2max + glycogen + hydration drive the patient-specific differences.
+        # BioGears FatigueLevel slope: NOT used — its 5-min transient (0.05-0.10/min)
+        # is 6-12x steeper than a sustainable 24h rate. Already documented above.
         rate_eva      = _RATE_EVA_ACCUMULATE
 
-        # Glycogen: BioGears MuscleGlycogen is in grams — right units, use directly.
-        gly_depl_rate = float(bg_calibration.get("glycogen_depletion_g_per_min",
-                                                  _GLY_DEPLETION_PER_MIN))
+        # BioGears glycogen_depletion_g_per_min: NOT used as the depletion rate.
+        # BioGears mobilises glycogen rapidly in the first 5 minutes (initial
+        # transient: ~17 g/min measured vs ~2-4 g/min sustained), so using the
+        # 5-minute slope as a per-minute rate causes glycogen to hit zero in
+        # ~85 min, locking gly_penalty at 1.60 for the entire remaining mission
+        # and driving fatigue to 1.0. Use the calibrated hardcoded rate instead.
+        gly_depl_rate = _GLY_DEPLETION_PER_MIN
+
+        # glycogen_start_g IS valid: it's the BioGears-measured fuel level at EVA
+        # start (post nutrition absorption), replacing the crude 80%-of-max estimate.
         glycogen_g    = float(bg_calibration.get("glycogen_start_g",
                                                   glycogen_max * 0.80))
 

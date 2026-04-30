@@ -160,6 +160,7 @@ def run_monte_carlo(
             eva_intensity=intensity_i,
             n_evas=n_evas,
             seed=seed,
+            eva_duration_min=eva_duration_min,
         )
 
         mission_df_i = build_mission_timeline(

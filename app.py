@@ -902,7 +902,8 @@ if run_btn:
 
     with st.spinner("Building mission timeline…"):
         events = sample_events(mission_hours=mission_hours, eva_intensity=eva_intensity,
-                               n_evas=n_evas, seed=42)
+                               n_evas=n_evas, seed=42,
+                               eva_duration_min=eva_duration_min)
         mission_df = build_mission_timeline(
             biogears_df=biogears_df, events=events, mission_hours=mission_hours,
             eva_duration_min=eva_duration_min, recovery_min=recovery_min,

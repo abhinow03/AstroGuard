@@ -42,16 +42,17 @@ class MissionEvent:
 
 
 def sample_events(
-    mission_hours: int,
-    eva_intensity: float,
-    n_evas: int = 1,
-    seed: int = 42,
+    mission_hours:    int,
+    eva_intensity:    float,
+    n_evas:           int   = 1,
+    seed:             int   = 42,
+    eva_duration_min: float = 0.0,   # 0 = use stochastic default (Normal 4h)
 ) -> List[MissionEvent]:
     """
     Stochastically sample a mission event schedule.
 
     EVA start time  ~ Uniform(6, 14) hours into each mission day
-    EVA duration    ~ Normal(4, 0.5) hours, clipped [2, 6]
+    EVA duration    = eva_duration_min if > 0, else Normal(4, 0.5) h clipped [2, 6]
     Sleep start     ~ fixed ~22 h ± Uniform(-1, 1) h per day
     Dehydration     ~ Bernoulli(0.3) of occurring; start Uniform(12, mission-4) h
     """
@@ -64,7 +65,10 @@ def sample_events(
     for i in range(n_evas):
         day_offset_h = i * spacing_h
         eva_start_h = day_offset_h + float(rng.uniform(6, min(14, spacing_h - 6)))
-        eva_dur_h = float(np.clip(rng.normal(4.0, 0.5), 2.0, 6.0))
+        if eva_duration_min > 0:
+            eva_dur_h = eva_duration_min / 60.0
+        else:
+            eva_dur_h = float(np.clip(rng.normal(4.0, 0.5), 2.0, 6.0))
 
         start_min = int(eva_start_h * 60)
         end_min = int((eva_start_h + eva_dur_h) * 60)
