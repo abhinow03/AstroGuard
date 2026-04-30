@@ -12,7 +12,7 @@ import numpy as np
 import streamlit as st
 
 from analytics.risk import mc_summary, mission_status, run_monte_carlo, single_run_analytics
-from simulation.biogears import get_biogears_segment
+from simulation.biogears import get_biogears_segment, extract_biogears_calibration
 from simulation.mission_log import save_mission_log
 from simulation.events import sample_events
 from simulation.fatigue import compute_fatigue, normalise_biogears_fatigue
@@ -512,8 +512,25 @@ caption, .stCaption { font-family: var(--mono) !important; font-size: 0.62rem !i
 
 # ── Cached helpers ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def cached_biogears(eva_intensity: float, eva_duration_min: float, recovery_min: float, mode: str = "live"):
-    return get_biogears_segment(eva_intensity, eva_duration_min, recovery_min, mode=mode)
+def cached_biogears(
+    eva_intensity:   float,
+    eva_duration_min: float,
+    recovery_min:    float,
+    patient_file:    str   = "StandardMale.xml",
+    carb_g:          float = 130.0,
+    fat_g:           float = 27.0,
+    protein_g:       float = 20.0,
+    sodium_g:        float = 1.0,
+    water_L:         float = 0.5,
+    mode:            str   = "live",
+):
+    return get_biogears_segment(
+        eva_intensity, eva_duration_min, recovery_min,
+        patient_file=patient_file,
+        carb_g=carb_g, fat_g=fat_g, protein_g=protein_g,
+        sodium_g=sodium_g, water_L=water_L,
+        mode=mode,
+    )
 
 @st.cache_data(show_spinner=False)
 def _cached_patients():
@@ -828,8 +845,20 @@ if run_btn:
 
     with st.spinner("Loading BioGears EVA segment…"):
         t0 = time.time()
+        # Pass selected patient XML + pre-EVA meal macros so BioGears runs with
+        # the correct patient physiology and models the metabolic response to nutrition.
+        _patient_file = f"{sel_name}.xml"
+        _fat_g        = ss.get("cfg_fat_g", 27.0)
+        _sodium_g     = ss.get("cfg_sodium_mg", 1000.0) / 1000.0   # mg → g for BioGears
         biogears_df, used_real, bg_msg = cached_biogears(
-            eva_intensity, eva_duration_min, recovery_min, bg_mode
+            eva_intensity, eva_duration_min, recovery_min,
+            patient_file=_patient_file,
+            carb_g=carb_g_per_meal,
+            fat_g=_fat_g,
+            protein_g=protein_g_per_meal,
+            sodium_g=_sodium_g,
+            water_L=ss.get("cfg_water_L", 2.0) / 3.0,   # daily → per-meal estimate
+            mode=bg_mode,
         )
         bg_elapsed = time.time() - t0
 
@@ -849,7 +878,8 @@ if run_btn:
             meals_per_day=meals_per_day, seed=0)
 
     with st.spinner("Computing fatigue model…"):
-        mg_run = microgravity_factors(mission_day)
+        mg_run   = microgravity_factors(mission_day)
+        bg_cal   = extract_biogears_calibration(biogears_df)
         fatigue, glycogen_fraction, risk_periods = compute_fatigue(
             hr_arr=mission_df["HeartRate"].values,
             events=events,
@@ -863,7 +893,9 @@ if run_btn:
             sodium_mg_per_day=sodium_mg_per_day,
             sleep_hours=sleep_hours,
             mission_day=mission_day,
+            bg_calibration=bg_cal,
         )
+        ss["bg_calibration"] = bg_cal  # store for breakdown panel
     bg_fatigue = normalise_biogears_fatigue(biogears_df, len(fatigue))
     analytics  = single_run_analytics(fatigue, threshold=threshold, mission_hours=mission_hours)
     status_label, status_color = mission_status(analytics, threshold)
@@ -1101,21 +1133,31 @@ with st.expander("// FATIGUE EQUATION BREAKDOWN  —  inputs & computed scalars"
         _glycogen_init,
         _RATE_EVA_ACCUMULATE, _RATE_SLEEP_RECOVER, _RATE_PASSIVE_RECOVER,
     )
-    _hyd_state = _hydration_state(_cfg["water_L"], _cfg["sodium_mg"])
+
+    # BioGears calibration from last run (or empty dict if not yet run)
+    _bgcal = ss.get("bg_calibration", {})
+    _sweat_mg_min    = _bgcal.get("sweat_rate_mg_per_min", None)
+    _sweat_L_day     = (_sweat_mg_min * 60 * 24 / 1e6) if _sweat_mg_min else None
+    _bg_gly_start    = _bgcal.get("glycogen_start_g", None)
+    _bg_gly_depl     = _bgcal.get("glycogen_depletion_g_per_min", None)
+    _bg_eva_rate     = _bgcal.get("eva_fatigue_rate_per_min", None)
+
+    _hyd_state = _hydration_state(_cfg["water_L"], _cfg["sodium_mg"],
+                                  sweat_loss_L_per_day=_sweat_L_day or 0.0)
     _hyd_pen   = _hydration_penalty(_hyd_state)
     _slp_pen   = _sleep_debt_penalty(_cfg["sleep_h"], mission_day_used)
     _prot_rec  = _protein_recovery_factor(_cfg["prot_g"], _cfg["meals"], _p.weight_kg)
     _gly_max   = _glycogen_init(_p.lean_mass_kg, _mg.glycogen_factor)
-    _gly_start = _gly_max * 0.80   # same initial condition as compute_fatigue
-
-    # Effective EVA rate at peak (glycogen at start = 80%)
-    _gly_frac_start = 0.80
+    # Use BioGears-measured start if available, else 80%
+    _gly_start = _bg_gly_start if _bg_gly_start else _gly_max * 0.80
+    _gly_frac_start = float(_gly_start / max(_gly_max, 1.0))
     _gly_pen_start  = 1.0 + 0.60 * (1.0 - _gly_frac_start)
-    # Worst case: glycogen depleted (fraction = 0)
     _gly_pen_worst  = 1.60
 
-    _eva_rate_start  = _RATE_EVA_ACCUMULATE * (1.0 / max(_mg.vo2max_factor, 0.01)) * _hyd_pen * _gly_pen_start * _slp_pen
-    _eva_rate_worst  = _RATE_EVA_ACCUMULATE * (1.0 / max(_mg.vo2max_factor, 0.01)) * _hyd_pen * _gly_pen_worst  * _slp_pen
+    # Use BioGears-calibrated rate if available, else hardcoded constant
+    _rate_base       = _bg_eva_rate if _bg_eva_rate else _RATE_EVA_ACCUMULATE
+    _eva_rate_start  = _rate_base * (1.0 / max(_mg.vo2max_factor, 0.01)) * _hyd_pen * _gly_pen_start * _slp_pen
+    _eva_rate_worst  = _rate_base * (1.0 / max(_mg.vo2max_factor, 0.01)) * _hyd_pen * _gly_pen_worst  * _slp_pen
     _slp_rate        = _RATE_SLEEP_RECOVER  * _mg.vo2max_factor * _prot_rec * (_cfg["sleep_h"] / 8.0)
     _rest_rate       = _RATE_PASSIVE_RECOVER * _prot_rec / max(_slp_pen, 0.01)
 
@@ -1148,34 +1190,44 @@ with st.expander("// FATIGUE EQUATION BREAKDOWN  —  inputs & computed scalars"
   <div style="color:var(--hud-muted)">Glycogen capacity (adj)</div>
   <div style="color:var(--hud-text);margin-bottom:0.4rem">{_gly_max:.0f} g  (x{_mg.muscle_factor:.3f} muscle factor)</div>
 
-  <div style="color:var(--hud-muted)">Glycogen at mission start</div>
-  <div style="color:var(--hud-text)">{_gly_start:.0f} g  (80% of capacity)</div>
+  <div style="color:var(--hud-muted)">Glycogen at EVA start</div>
+  <div style="color:var(--hud-text)">{_gly_start:.0f} g
+    {'<span style="color:var(--hud-cyan)">[BioGears measured]</span>' if _bg_gly_start else '(80% est.)'}
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
     with eq_c2:
+        _sweat_display = (
+            f"{_sweat_mg_min:.0f} mg/min = {_sweat_L_day:.2f} L/day "
+            '<span style="color:var(--hud-cyan)">[BioGears]</span>'
+            if _sweat_mg_min else "not available"
+        )
+        _gly_depl_display = (
+            f"{_bg_gly_depl:.2f} g/min "
+            '<span style="color:var(--hud-cyan)">[BioGears]</span>'
+            if _bg_gly_depl else "2.80 g/min [default]"
+        )
         st.markdown(f"""
 <div style="font-family:var(--mono);font-size:0.6rem;line-height:1.9">
   <div style="color:var(--hud-cyan);text-transform:uppercase;letter-spacing:0.18em;
               margin-bottom:0.5rem;border-bottom:1px solid var(--hud-border);padding-bottom:0.3rem">
     Nutrition + Recovery Scalars
   </div>
-  <div style="color:var(--hud-muted)">Daily water</div>
-  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_cfg["water_L"]:.1f} L  |  Na {_cfg["sodium_mg"]:.0f} mg/day</div>
+  <div style="color:var(--hud-muted)">Daily water / sodium</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_cfg["water_L"]:.1f} L  |  {_cfg["sodium_mg"]:.0f} mg Na/day</div>
 
-  <div style="color:var(--hud-muted)">Hydration state</div>
+  <div style="color:var(--hud-muted)">SweatRate (EVA) — BioGears</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_sweat_display}</div>
+
+  <div style="color:var(--hud-muted)">Hydration state (sweat-adjusted)</div>
   <div style="color:{'var(--hud-green)' if _hyd_state > 0.90 else 'var(--hud-amber)'};margin-bottom:0.4rem">
-    {_hyd_state:.3f}  (need = {2.0 + max(0,_cfg["sodium_mg"]-1500)*1.5e-4:.2f} L/day)
-  </div>
-
-  <div style="color:var(--hud-muted)">Hydration penalty (EVA)</div>
-  <div style="color:{'var(--hud-green)' if _hyd_pen < 1.05 else 'var(--hud-amber)'};margin-bottom:0.4rem">
-    x{_hyd_pen:.3f}  (+{(_hyd_pen-1)*100:.1f}% EVA fatigue rate)
+    {_hyd_state:.3f}  (penalty x{_hyd_pen:.3f}, +{(_hyd_pen-1)*100:.1f}%)
   </div>
 
   <div style="color:var(--hud-muted)">Sleep {_cfg["sleep_h"]:.1f}h / night</div>
   <div style="color:{'var(--hud-red)' if _slp_pen > 1.15 else 'var(--hud-amber)' if _slp_pen > 1.05 else 'var(--hud-green)'};margin-bottom:0.4rem">
-    debt penalty x{_slp_pen:.3f}  (+{(_slp_pen-1)*100:.1f}% EVA fatigue)
+    debt penalty x{_slp_pen:.3f}  (+{(_slp_pen-1)*100:.1f}%)
   </div>
 
   <div style="color:var(--hud-muted)">Protein {_cfg["prot_g"]*_cfg["meals"]:.0f}g/day vs {1.6*_p.weight_kg:.0f}g target</div>
@@ -1183,29 +1235,35 @@ with st.expander("// FATIGUE EQUATION BREAKDOWN  —  inputs & computed scalars"
     recovery factor x{_prot_rec:.3f}
   </div>
 
-  <div style="color:var(--hud-muted)">Glycogen penalty (80% full)</div>
-  <div style="color:var(--hud-text);margin-bottom:0.4rem">x{_gly_pen_start:.3f}</div>
+  <div style="color:var(--hud-muted)">Glycogen depletion rate</div>
+  <div style="color:var(--hud-text);margin-bottom:0.4rem">{_gly_depl_display}</div>
 
-  <div style="color:var(--hud-muted)">Glycogen penalty (depleted)</div>
-  <div style="color:var(--hud-red)">x{_gly_pen_worst:.3f}  (worst case)</div>
+  <div style="color:var(--hud-muted)">Glycogen penalty ({_gly_frac_start*100:.0f}% full)</div>
+  <div style="color:var(--hud-text)">x{_gly_pen_start:.3f}</div>
 </div>
 """, unsafe_allow_html=True)
 
     with eq_c3:
+        _rate_source = (
+            f'<span style="color:var(--hud-cyan)">[BioGears FatigueLevel slope]</span>'
+            if _bg_eva_rate else
+            '[hardcoded default]'
+        )
         st.markdown(f"""
 <div style="font-family:var(--mono);font-size:0.6rem;line-height:1.9">
   <div style="color:var(--hud-cyan);text-transform:uppercase;letter-spacing:0.18em;
               margin-bottom:0.5rem;border-bottom:1px solid var(--hud-border);padding-bottom:0.3rem">
     Per-Minute Fatigue Rates
   </div>
-  <div style="color:var(--hud-muted)">EVA accumulation formula</div>
+  <div style="color:var(--hud-muted)">Base EVA fatigue rate</div>
   <div style="color:var(--hud-text);margin-bottom:0.2rem">
-    {_RATE_EVA_ACCUMULATE} x (hr_norm / {_mg.vo2max_factor:.3f})<br>
-    x {_hyd_pen:.3f} [hydration]<br>
-    x {_slp_pen:.3f} [sleep debt]<br>
+    {_rate_base:.5f} /min  {_rate_source}<br>
+    x (hr_norm / {_mg.vo2max_factor:.3f})  [VO2max]<br>
+    x {_hyd_pen:.3f}  [hydration]<br>
+    x {_slp_pen:.3f}  [sleep debt]<br>
     x glycogen_penalty
   </div>
-  <div style="color:var(--hud-muted);margin-top:0.4rem">EVA rate (glycogen 80%)</div>
+  <div style="color:var(--hud-muted);margin-top:0.4rem">EVA rate (glycogen {_gly_frac_start*100:.0f}%)</div>
   <div style="color:var(--hud-orange);margin-bottom:0.4rem">+{_eva_rate_start:.5f} / min</div>
 
   <div style="color:var(--hud-muted)">EVA rate (glycogen depleted)</div>
