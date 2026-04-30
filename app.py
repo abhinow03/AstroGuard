@@ -893,7 +893,7 @@ if run_btn:
             mission_day=mission_day,
             bg_calibration=bg_cal,
         )
-        ss["bg_calibration"] = bg_cal  # store for breakdown panel
+        st.session_state["bg_calibration"] = bg_cal  # store for breakdown panel
     bg_fatigue = normalise_biogears_fatigue(biogears_df, len(fatigue))
     analytics  = single_run_analytics(fatigue, threshold=threshold, mission_hours=mission_hours)
     status_label, status_color = mission_status(analytics, threshold)
